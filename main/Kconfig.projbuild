@@ -194,6 +194,12 @@ choice BOARD_TYPE
     config BOARD_TYPE_ELECTRON_BOT
         bool "ElectronBot"
         depends on IDF_TARGET_ESP32S3
+    config BOARD_TYPE_ES8311_ML307_4G_VOICE
+        bool "ES8311 + ML307C 4G Voice-only Custom Board"
+        depends on IDF_TARGET_ESP32S3
+    config BOARD_TYPE_ES8311_ML307_S3
+        bool "ES8311 + ML307C + ST77916 4G Custom Board"
+        depends on IDF_TARGET_ESP32S3
     config BOARD_TYPE_ESP32_P4_FUNCTION_EV_BOARD
         bool "Espressif ESP32-P4/P4X-Function-EV-Board"
         depends on IDF_TARGET_ESP32P4
