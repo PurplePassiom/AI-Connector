@@ -6,7 +6,8 @@
             "name": "es8311-ml307-4g-voice",
             "sdkconfig_append": [
                 "CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y",
-                "CONFIG_SPIRAM=n"
+                "CONFIG_SPIRAM=n",
+                "CONFIG_SOA_ENABLE=y"
             ]
         }
     ]

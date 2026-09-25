@@ -143,9 +143,30 @@
 #define NET_HEAL_POWER_CYCLE 0
 #define NET_HEAL_MAX_CFUN_TRIES 3
 
+// ===== CAN (TWAI) 整车总线 =====
+// 这三个脚以前只是「引出来了但固件没用」，现在正式使能（SOA 框架走这条总线）。
+//   收发器 TXD <- ESP 的 CAN_TX
+//   收发器 RXD -> ESP 的 CAN_RX
+//   收发器 STB <- ESP 的 CAN_STB（待机控制，高电平=待机，低电平=正常通信）
+// 引脚与 MIO 工程 (整车 CAN) 对齐，波特率也是整车统一的 500 kbps。
+#define SOA_CAN_ENABLE          1
+
+#define CAN_TX_PIN              GPIO_NUM_39
+#define CAN_RX_PIN              GPIO_NUM_40
+#define CAN_STB_PIN             GPIO_NUM_41
+// STB 引脚在「待机」时的电平。绝大多数收发器（TJA1051/1054、SIT1042 等）是
+// 高电平待机；若本板收发器相反，把它改成 0 即可。
+#define CAN_STB_STANDBY_LEVEL   1
+#define CAN_BITRATE             500000
+
+// 上电就拉起 SOA 框架（router + CAN/IPC/UART 传输层）并让 HUI 节点上线
+//   0 = 只初始化 CAN 驱动（收发 CAN 帧可用，但不建 HUI 节点、不发心跳）
+//   1 = 额外调用 soa_init() + HuiNode_Init()
+// HUI 节点号见 main/soa/soa_types.h 的 HUI_NODE_ID（当前 6）。
+#define SOA_INIT_ON_BOOT        1
+
 // ===== 已引出但固件暂未使用，仅作引脚记录 =====
 // USB 控制台 (USB-Serial/JTAG)：D- = GPIO19 / D+ = GPIO20（必须保留，不可挪用）
 // 输入电压 ADC：GPIO1
-// CAN (TWAI)：CAN_TX = GPIO39 / CAN_RX = GPIO40 / CAN_STB = GPIO41
 
 #endif // _BOARD_CONFIG_H_

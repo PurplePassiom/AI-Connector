@@ -1062,6 +1062,41 @@ if(CONFIG_IDF_TARGET_ESP32S3)
     list(APPEND SOURCES "boards/common/esp32_camera.cc")
 endif()
 
+# SOA (Service-Oriented Architecture) framework, ported from the MIO project.
+# Kept behind a Kconfig switch: it pulls in the CAN (TWAI) driver, which does not
+# exist on every target this repo supports.
+if(CONFIG_SOA_ENABLE)
+    list(APPEND SOURCES
+        "soa/soa.c"
+        "soa/soa_router.c"
+        "soa/soa_oncan.c"
+        "soa/soa_onipc.c"
+        "soa/soa_onuart.c"
+        "soa/Soa_StateS.c"
+        "soa/hui.cc"
+        "soa/canard/canard.c"
+        "soa/port/can_bus.c"
+    )
+    # main/dsdl holds the generated DSDL (Cyphal) headers. Each sub-directory is a
+    # namespace (dsdl_Common, dsdl_Host, dsdl_CenterAnd*, ...) and is included by
+    # bare file name, so every sub-directory has to be on the include path.
+    # Globbed on purpose: the set of namespaces changes as the .dsdl definitions do.
+    file(GLOB DSDL_SUBDIRS CONFIGURE_DEPENDS LIST_DIRECTORIES true
+        "${CMAKE_CURRENT_SOURCE_DIR}/dsdl/*")
+    foreach(DSDL_SUBDIR ${DSDL_SUBDIRS})
+        if(IS_DIRECTORY "${DSDL_SUBDIR}")
+            list(APPEND INCLUDE_DIRS "${DSDL_SUBDIR}")
+        endif()
+    endforeach()
+    list(APPEND INCLUDE_DIRS
+        "${CMAKE_CURRENT_SOURCE_DIR}/soa"
+        "${CMAKE_CURRENT_SOURCE_DIR}/soa/canard"
+        "${CMAKE_CURRENT_SOURCE_DIR}/soa/port"
+        # required by <nunavut/support/serialization.h>
+        "${CMAKE_CURRENT_SOURCE_DIR}/dsdl"
+    )
+endif()
+
 set(MAIN_PRIV_REQUIRES_EXTRA "")
 if(BOARD_TYPE STREQUAL "m5stack-stick-s3")
     list(APPEND MAIN_PRIV_REQUIRES_EXTRA
@@ -1103,6 +1138,14 @@ idf_component_register(SRCS ${SOURCES}
                         esp_driver_jpeg
                         esp_driver_ppa
                         esp_driver_tsens
+                        # esp_twai.h (the IDF 6.x TWAI driver) for main/soa/port/can_bus.c.
+                        # ⚠️ 必须写在这里（字面量），不能放进 MAIN_PRIV_REQUIRES_EXTRA：
+                        # 本工程开了 MINIMAL_BUILD，IDF 会在早期的 "guess" 趟里就定下组件集，
+                        # 而那一趟看不到通过变量追加的需求 —— esp_driver_twai 会被裁掉，
+                        # 编译时就变成 `esp_twai.h: No such file or directory`。
+                        # 对所有板子都列上只是多编译一个小组件；没人引用 can_init() 时，
+                        # 链接器不会把这个静态库拉进固件。
+                        esp_driver_twai
                         esp_app_format
                         app_update
                         spi_flash

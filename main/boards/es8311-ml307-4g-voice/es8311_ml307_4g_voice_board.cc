@@ -11,6 +11,13 @@
 
 #include <utility>
 
+#if SOA_CAN_ENABLE
+// CAN 总线驱动 + HUI 节点（从 MIO 工程移植，见 main/soa/）
+#include "can_bus.h"
+#include "hui.h"
+#include "soa.h"
+#endif
+
 // 板级诊断 / 自愈任务（都要等模组就绪后再碰 AT 通道，所以共用一套网络事件同步）
 #if GNSS_TEST || NET_HEAL_ENABLE
 #include <freertos/FreeRTOS.h>
@@ -187,10 +194,45 @@ private:
         });
     }
 
+#if SOA_CAN_ENABLE
+    // ===== CAN (TWAI) 整车总线 =====
+    // 引脚/波特率/STB 极性全部来自板级 config.h，核心代码 (main/soa/port/can_bus.c)
+    // 不认识任何板子。
+    void InitializeCan() {
+        const can_bus_config_t can_cfg = {
+            .tx_gpio = CAN_TX_PIN,
+            .rx_gpio = CAN_RX_PIN,
+            .stb_gpio = CAN_STB_PIN,
+            .stb_standby_level = CAN_STB_STANDBY_LEVEL,
+            .bitrate = CAN_BITRATE,
+        };
+
+        esp_err_t err = can_init(&can_cfg);
+        if (err != ESP_OK) {
+            // CAN 起不来表示总线侧不可用，但语音功能不应该因此瘫痪
+            ESP_LOGE(TAG, "[CAN] 初始化失败: %s", esp_err_to_name(err));
+            return;
+        }
+        ESP_LOGI(TAG, "[CAN] 就绪: TX=GPIO%d RX=GPIO%d STB=GPIO%d @%d bps",
+                 CAN_TX_PIN, CAN_RX_PIN, CAN_STB_PIN, CAN_BITRATE);
+
+#if SOA_INIT_ON_BOOT
+        // 拉起 SOA 框架 (router + CAN/IPC/UART 传输层)，然后让 HUI 节点上线：
+        // 发 SlaveHeartbeat / 收 HostHeartbeat / 向 Central 发 HuiRead|Write|Ioctl。
+        // 详见 main/soa/hui.h。
+        soa_init();
+        HuiNode_Init();
+#endif
+    }
+#endif
+
 public:
     Es8311Ml3074gVoiceBoard()
         : Ml307Board(ML307_TX_PIN, ML307_RX_PIN), boot_button_(BOOT_BUTTON_GPIO) {
         InitializeCodecI2c();
+#if SOA_CAN_ENABLE
+        InitializeCan();
+#endif
         Initialize4GModule();
         InitializeButtons();
 #if GNSS_TEST || NET_HEAL_ENABLE

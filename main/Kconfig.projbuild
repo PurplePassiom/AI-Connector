@@ -1140,4 +1140,22 @@ menu "TAIJIPAI_S3_CONFIG"
         启动双声道
 endmenu
 
+menu "SOA (Service-Oriented Architecture)"
+    depends on SOC_TWAI_SUPPORTED
+
+    config SOA_ENABLE
+        bool "Enable SOA framework (router + CAN/Cyphal transport)"
+        default y if BOARD_TYPE_ES8311_ML307_4G_VOICE
+        help
+            Enable the SOA framework ported from the MIO project (main/soa/):
+            router + CAN (canard/Cyphal) + IPC + UART transports, the per-node
+            Soa_StateS state machine, and the HUI node (main/soa/hui.*) that talks
+            to the vehicle Central ECU.
+
+            Only boards that are actually wired to the vehicle CAN bus need this.
+            The CAN pins are NOT configured here - each board passes them from its
+            own config.h through can_bus_config_t.
+
+endmenu
+
 endmenu

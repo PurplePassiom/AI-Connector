@@ -1,0 +1,284 @@
+/**
+ * @file hui.cc
+ * @brief HUI 节点实现。设计说明与职责见 hui.h。
+ *
+ * ⚠️ 实现须知 (踩过的坑, 不要改回去):
+ *   1. 总线上与本节点有关的只有三件事: 发 SlaveHeartbeat、收 HostHeartbeat、
+ *      发 HuiRead/Write/Ioctl 请求并处理它们的应答。
+ *   2. 所有 SOA 回调都跑在**传输层的任务**里 (soa_oncan 的 CAN 任务), 不是主任务。
+ *      本文件只碰总线上自己的状态, 不碰 Application/音频。
+ *   3. 协同休眠 (SleepMgr) 已从本工程移除, 所以 SlaveHeartbeat 的字段目前由
+ *      本文件自己维护 (见下面的 s_hb_*)。等休眠协调回来时改成从 SleepMgr 取即可。
+ */
+
+#include "hui.h"
+
+#include "soa.h"
+#include "soa_types.h"
+
+#include "Health_1_0.h"
+#include "HostHeartbeat_1_0.h"
+#include "HuiIoctl_1_0.h"
+#include "HuiRead_1_0.h"
+#include "HuiWrite_1_0.h"
+#include "PowerMode_1_0.h"
+#include "SlaveHeartbeat_1_0.h"
+#include "SleepReason_1_0.h"
+#include "WakeReason_1_0.h"
+
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+
+#include <esp_log.h>
+
+#include <string.h>
+
+#define TAG "HuiNode"
+
+#define HUI_HEARTBEAT_MS        1000U   /* SlaveHeartbeat 周期 (整车约定 1 Hz) */
+#define HUI_STACK_SIZE          3072U   /* 要跑序列化 + ESP_LOG */
+#define HUI_TASK_PRIO           4
+
+/* SlaveHeartbeat 的字段来源。
+ * 协同休眠已移除, 这些字段先由本文件自己维护:
+ *   mode         固定 WORKING (本节点上电即工作)
+ *   health       可由应用层覆盖 (HuiNode_SetHealth)
+ *   sleep/wake   暂固定 NONE (休眠握手回来后再接)
+ *   session_id   固定 1, count 每帧自增 */
+static uint8_t  s_hb_health     = dsdl_Common_Health_1_0_NOMINAL;
+static uint8_t  s_hb_session_id = 1u;
+static uint16_t s_hb_count      = 0u;
+
+/* 主机心跳变化检测 (1 Hz 不能每帧打日志) */
+static uint8_t  s_host_mode_last    = 0xFFu;
+static uint8_t  s_host_session_last = 0xFFu;
+
+static TaskHandle_t s_task = nullptr;
+static bool s_initialized = false;
+
+/* HuiRead/HuiWrite 的共享状态码 (两个服务各自编号, 但 0 都是 NO_ERROR) */
+#define HUI_READ_ERR_UNKNOWN_SUB_SERVICE     1u
+#define HUI_READ_ERR_NOT_READABLE            2u
+#define HUI_READ_ERR_BAD_LENGTH              3u
+#define HUI_READ_ERR_INTERNAL                4u
+#define HUI_WRITE_ERR_UNKNOWN_SUB_SERVICE    1u
+#define HUI_WRITE_ERR_READ_ONLY              2u
+#define HUI_WRITE_ERR_BAD_LENGTH             3u
+#define HUI_WRITE_ERR_VALUE_REJECTED         4u
+#define HUI_WRITE_ERR_INTERNAL               5u
+#define HUI_IOCTL_ERR_UNSUPPORTED_REQUEST    1u
+#define HUI_IOCTL_ERR_BAD_LENGTH             2u
+#define HUI_IOCTL_ERR_VALUE_REJECTED         3u
+#define HUI_IOCTL_ERR_INTERNAL               4u
+
+/* ===================== 发送: SlaveHeartbeat ===================== */
+
+static void HuiNode_PublishHeartbeat(void)
+{
+    dsdl_Common_SlaveHeartbeat_1_0 hb;
+    memset(&hb, 0, sizeof(hb));
+    hb.mode.value         = dsdl_Common_PowerMode_1_0_WORKING;
+    hb.health.value       = s_hb_health;
+    hb.sleep_reason.value = dsdl_Common_SleepReason_1_0_NONE;
+    hb.wake_reason.value  = dsdl_Common_WakeReason_1_0_NONE;
+    hb.session_id         = s_hb_session_id;
+    hb.count              = ++s_hb_count;
+
+    uint8_t buf[dsdl_Common_SlaveHeartbeat_1_0_SERIALIZATION_BUFFER_SIZE_BYTES_];
+    size_t  size = sizeof(buf);
+    if (dsdl_Common_SlaveHeartbeat_1_0_serialize_(&hb, buf, &size) < 0)
+    {
+        ESP_LOGW(TAG, "SlaveHeartbeat 序列化失败");
+        return;
+    }
+
+    soa_request_send(HUI_NODE_ID, MASTER_NODE_ID, (uint16_t)dsdl_Common_SlaveHeartbeat_1_0_FIXED_PORT_ID_,
+                buf, size);
+}
+
+/* ===================== 接收: HostHeartbeat ===================== */
+
+static void HuiNode_OnHostHeartbeat(const uint8_t* data, size_t data_len)
+{
+    if (data == nullptr || data_len == 0)
+    {
+        return;
+    }
+    dsdl_Host_HostHeartbeat_1_0 hb;
+    memset(&hb, 0, sizeof(hb));
+    size_t size = data_len;
+    if (dsdl_Host_HostHeartbeat_1_0_deserialize_(&hb, data, &size) < 0)
+    {
+        ESP_LOGW(TAG, "HostHeartbeat 反序列化失败 (%u 字节)", (unsigned)data_len);
+        return;
+    }
+
+    /* 只在 mode / session 变化时打日志 —— 主机心跳是 1 Hz, 每帧打会把日志淡化 */
+    if (hb.mode != s_host_mode_last || hb.session_id != s_host_session_last)
+    {
+        s_host_mode_last    = hb.mode;
+        s_host_session_last = hb.session_id;
+        ESP_LOGI(TAG, "Central 心跳: mode=%u health=%u session=%u counter=%u",
+                 (unsigned)hb.mode, (unsigned)hb.health,
+                 (unsigned)hb.session_id, (unsigned)hb.heartbeat_counter);
+    }
+}
+
+/* ===================== 服务: HuiRead / HuiWrite / HuiIoctl ===================== */
+
+void HuiNode_SendReadRequest(uint16_t sub_service)
+{
+    dsdl_CenterAndHui_HuiRead_Request_1_0 rqst;
+    memset(&rqst, 0, sizeof(rqst));
+    rqst.sub_service = sub_service;
+
+    uint8_t buf[dsdl_CenterAndHui_HuiRead_Request_1_0_SERIALIZATION_BUFFER_SIZE_BYTES_];
+    size_t  size = sizeof(buf);
+    if (dsdl_CenterAndHui_HuiRead_Request_1_0_serialize_(&rqst, buf, &size) < 0)
+    {
+        return;
+    }
+    soa_request_send(HUI_NODE_ID, MASTER_NODE_ID,
+                     (uint16_t)dsdl_CenterAndHui_HuiRead_1_0_FIXED_PORT_ID_, buf, size);
+}
+
+static void HuiNode_OnHuiReadResponse(const uint8_t* data, size_t data_len)
+{
+
+}
+
+void HuiNode_SendWriteRequest(uint16_t sub_service, const uint8_t* payload, size_t payload_len)
+{
+    dsdl_CenterAndHui_HuiWrite_Request_1_0 rqst;
+    memset(&rqst, 0, sizeof(rqst));
+
+    uint8_t buf[dsdl_CenterAndHui_HuiWrite_Request_1_0_SERIALIZATION_BUFFER_SIZE_BYTES_];
+    if (payload != nullptr && payload_len > 0)
+    {
+        if (payload_len > sizeof(rqst.data.elements))
+        {
+            payload_len = sizeof(rqst.data.elements);
+        }
+        memcpy(rqst.data.elements, payload, payload_len);
+        rqst.data.count = payload_len;
+    }
+    size_t  size = sizeof(buf);
+    if (dsdl_CenterAndHui_HuiWrite_Request_1_0_serialize_(&rqst, buf, &size) < 0)
+    {
+        return;
+    }
+    soa_request_send(HUI_NODE_ID, MASTER_NODE_ID,
+                      (uint16_t)dsdl_CenterAndHui_HuiWrite_1_0_FIXED_PORT_ID_, buf, size);
+}
+
+static void HuiNode_OnHuiWriteResponse(const uint8_t* data, size_t data_len)
+{
+
+}
+
+void HuiNode_SendIoctlRequest(const uint8_t* payload, size_t payload_len)
+{
+    dsdl_CenterAndHui_HuiIoctl_Request_1_0 rqst;
+    memset(&rqst, 0, sizeof(rqst));
+    if (payload != nullptr && payload_len > 0)
+    {
+        if (payload_len > sizeof(rqst.data.elements))
+        {
+            payload_len = sizeof(rqst.data.elements);
+        }
+        memcpy(rqst.data.elements, payload, payload_len);
+        rqst.data.count = payload_len;
+    }
+
+    uint8_t buf[dsdl_CenterAndHui_HuiIoctl_Request_1_0_SERIALIZATION_BUFFER_SIZE_BYTES_];
+    size_t  size = sizeof(buf);
+    if (dsdl_CenterAndHui_HuiIoctl_Request_1_0_serialize_(&rqst, buf, &size) < 0)
+    {
+        return;
+    }
+    soa_request_send(HUI_NODE_ID, MASTER_NODE_ID,
+                      (uint16_t)dsdl_CenterAndHui_HuiIoctl_1_0_FIXED_PORT_ID_, buf, size);
+}
+
+static void HuiNode_OnHuiIoctlResponse(const uint8_t* data, size_t data_len)
+{
+    //TODO: being handling ioctl response
+}
+
+/* ===================== 周期任务: 1 Hz SlaveHeartbeat ===================== */
+
+static void HuiNode_Task(void* arg)
+{
+    (void)arg;
+
+    for (;;)
+    {
+        // HuiNode_PublishHeartbeat();
+        vTaskDelay(pdMS_TO_TICKS(HUI_HEARTBEAT_MS));
+    }
+}
+
+void HuiNode_Init(void)
+{
+    if (s_initialized)
+    {
+        ESP_LOGW(TAG, "HuiNode_Init() 重复调用, 忽略");
+        return;
+    }
+
+    /* 1. 在 SOA 总线上建立本节点 (CAN only —— IPC / UART 暂不参与) */
+    soa_create_node(HUI_NODE_ID, SOA_NODE_CAN);
+
+    /* 1b. 登记路由。⚠️ 这一步不能省:
+           soa_request_send() / soa_subscribe() 都要先在路由表里查到路径才肯干活,
+           查不到就直接返回 SOA_NOT_OK (只有 subscribe_broadcast 不走路由表)。
+           写法与 MIO 各节点 Init 一致 —— MIO 的 AI agent 走 UART, 本板改走 CAN。 */
+    soa_create_route_path(HUI_NODE_ID, MASTER_NODE_ID, SOA_PATH_CAN);
+
+    /* 2. 订阅中央 ECU 的整车心跳 */
+    if (soa_subscribe_broadcast(HUI_NODE_ID, SoaBroadcast,
+                               (uint16_t)dsdl_Host_HostHeartbeat_1_0_FIXED_PORT_ID_,
+                               (uint16_t)dsdl_Host_HostHeartbeat_1_0_EXTENT_BYTES_,
+                               HuiNode_OnHostHeartbeat) != SOA_OK)
+    {
+        ESP_LOGE(TAG, "订阅 HostHeartbeat 失败");
+    }
+
+    /* 3. 订阅三个 HUI 服务的**应答** (本节点是 client, Central 是 server) */
+    if (soa_subscribe(HUI_NODE_ID, MASTER_NODE_ID, SoaResponse,
+                      (uint16_t)dsdl_CenterAndHui_HuiRead_1_0_FIXED_PORT_ID_,
+                      (uint16_t)dsdl_CenterAndHui_HuiRead_Response_1_0_EXTENT_BYTES_,
+                      HuiNode_OnHuiReadResponse) != SOA_OK)
+    {
+        ESP_LOGE(TAG, "订阅 HuiRead 失败");
+    }
+    if (soa_subscribe(HUI_NODE_ID, MASTER_NODE_ID, SoaResponse,
+                      (uint16_t)dsdl_CenterAndHui_HuiWrite_1_0_FIXED_PORT_ID_,
+                      (uint16_t)dsdl_CenterAndHui_HuiWrite_Response_1_0_EXTENT_BYTES_,
+                      HuiNode_OnHuiWriteResponse) != SOA_OK)
+    {
+        ESP_LOGE(TAG, "订阅 HuiWrite 失败");
+    }
+    if (soa_subscribe(HUI_NODE_ID, MASTER_NODE_ID, SoaResponse,
+                      (uint16_t)dsdl_CenterAndHui_HuiIoctl_1_0_FIXED_PORT_ID_,
+                      (uint16_t)dsdl_CenterAndHui_HuiIoctl_Response_1_0_EXTENT_BYTES_,
+                      HuiNode_OnHuiIoctlResponse) != SOA_OK)
+    {
+        ESP_LOGE(TAG, "订阅 HuiIoctl 失败");
+    }
+
+    /* 4. 周期任务: 1 Hz 发 SlaveHeartbeat */
+    if (xTaskCreate(HuiNode_Task, "hui_node", HUI_STACK_SIZE, nullptr,
+                    HUI_TASK_PRIO, &s_task) != pdPASS)
+    {
+        ESP_LOGE(TAG, "创建 HUI 节点任务失败");
+        s_task = nullptr;
+        return;
+    }
+
+    s_initialized = true;
+    ESP_LOGI(TAG, "HUI 节点已上线: node_id=%u, HostHeartbeat=%u, SlaveHeartbeat=%u",
+             (unsigned)HUI_NODE_ID,
+             (unsigned)dsdl_Host_HostHeartbeat_1_0_FIXED_PORT_ID_,
+             (unsigned)dsdl_Common_SlaveHeartbeat_1_0_FIXED_PORT_ID_);
+}
