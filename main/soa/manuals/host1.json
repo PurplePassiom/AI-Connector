@@ -1,0 +1,67 @@
+{
+  "schema": 1,
+  "device_id": "0001",
+  "alias": "host1",
+  "name": "主机1",
+  "description": "示例手册 (参考数据, 不是固件内置内容): 由后端按设备 ID 下发。命令号与字节编码请以主机实际手册为准。",
+  "commands": [
+    {
+      "id": "1000",
+      "kind": "read",
+      "name": "get_device_id",
+      "description": "获取设备 ID (通用命令)",
+      "value": { "type": "hex", "bytes": 2 }
+    },
+    {
+      "id": "ff01",
+      "kind": "read",
+      "name": "get_battery",
+      "description": "获取电量",
+      "value": { "type": "u8", "unit": "%" }
+    },
+    {
+      "id": "ff02",
+      "kind": "read",
+      "name": "get_speed",
+      "description": "获取速度",
+      "value": { "type": "u16", "scale": 0.1, "unit": "km/h" }
+    },
+    {
+      "id": "f101",
+      "kind": "ioctl",
+      "name": "set_headlight",
+      "description": "打开/关闭大灯",
+      "args": [
+        { "name": "on", "type": "u8", "description": "0=关闭, 1=打开" }
+      ]
+    },
+    {
+      "id": "f102",
+      "kind": "ioctl",
+      "name": "set_emergency_light",
+      "description": "打开/关闭应急灯 (危险报警闪光灯 / 双闪)。打开时左右转向灯同时点亮并一起闪烁; 关闭后左右转向灯回到各自状态。只在紧急情况或临时停车时使用。",
+      "args": [
+        { "name": "on", "type": "u8", "description": "0=关闭, 1=打开 (同时点亮左右转弯灯)" }
+      ]
+    },
+    {
+      "id": "f103",
+      "kind": "ioctl",
+      "name": "set_drive_mode",
+      "description": "设置车辆驾驶模式。1=节能模式 (限速、最省电), 2=标准模式 (默认), 3=运动模式 (动力最强、最耗电)。切换模式会改变动力输出, 行驶中切换请提醒驾驶员注意。",
+      "args": [
+        { "name": "mode", "type": "u8", "description": "1=节能模式, 2=标准模式, 3=运动模式" }
+      ]
+    },
+    {
+      "id": "f104",
+      "kind": "ioctl",
+      "name": "calibrate_motor",
+      "description": "设置电机极数与最大功率并开始电机校准。重要: 调用前必须先提醒用户把电机/驱动轮悬空 (离地、能自由空转), 确认安全后再调用本命令; 校准会驱动电机自转, 若轮子落地或有负载可能导致车辆突然窜动伤人。主机只在校验到整车停稳 (转速为 0) 且不在休眠收尾时才执行, 否则命令直接失败 (需停稳后重试)。",
+      "args": [
+        { "name": "motor_poles", "type": "u8", "description": "电机极数, 如 14 (7 对极的轮毂电机填 14; 填的是极数, 不是极对数)" },
+        { "name": "max_power", "type": "u16", "unit": "W", "description": "电机最大功率, 单位 W, 如 350" }
+      ]
+    }
+  ]
+}

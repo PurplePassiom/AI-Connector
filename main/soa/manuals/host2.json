@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "device_id": "0002",
+  "alias": "host2",
+  "name": "主机2",
+  "description": "示例手册 (参考数据, 不是固件内置内容): 由后端按设备 ID 下发。同一类功能在不同主机上的命令号可能完全不同 —— 这正是需要按设备 ID 取手册的原因。",
+  "commands": [
+    {
+      "id": "1000",
+      "kind": "read",
+      "name": "get_device_id",
+      "description": "获取设备 ID (通用命令)",
+      "value": { "type": "hex", "bytes": 2 }
+    },
+    {
+      "id": "f110",
+      "kind": "read",
+      "name": "get_battery",
+      "description": "获取电量",
+      "value": { "type": "u8", "unit": "%" }
+    },
+    {
+      "id": "f111",
+      "kind": "read",
+      "name": "get_speed",
+      "description": "获取速度",
+      "value": { "type": "u16", "scale": 0.1, "unit": "km/h" }
+    },
+    {
+      "id": "f112",
+      "kind": "ioctl",
+      "name": "set_headlight",
+      "description": "打开/关闭大灯",
+      "args": [
+        { "name": "on", "type": "u8", "description": "0=关闭, 1=打开" }
+      ]
+    },
+    {
+      "id": "f113",
+      "kind": "ioctl",
+      "name": "set_emergency_light",
+      "description": "打开/关闭应急灯",
+      "args": [
+        { "name": "on", "type": "u8", "description": "0=关闭, 1=打开" }
+      ]
+    }
+  ]
+}

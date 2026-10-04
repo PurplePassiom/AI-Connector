@@ -1074,6 +1074,9 @@ if(CONFIG_SOA_ENABLE)
         "soa/soa_onuart.c"
         "soa/Soa_StateS.c"
         "soa/hui.cc"
+        "soa/hui_rpc.cc"
+        "soa/hui_manual.cc"
+        "soa/hui_mcp.cc"
         "soa/canard/canard.c"
         "soa/port/can_bus.c"
     )
@@ -1095,6 +1098,26 @@ if(CONFIG_SOA_ENABLE)
         # required by <nunavut/support/serialization.h>
         "${CMAKE_CURRENT_SOURCE_DIR}/dsdl"
     )
+
+    # HUI 命令手册: 把 soa/manuals/*.json 打进 assets 分区, 运行时 hui_manual.cc
+    # 用 Assets::GetAssetData() 按 device_id 读取 —— 这样不联网也能用, 也不占 app 分区。
+    # 改手册后只需重烧 assets 分区:
+    #   esptool write-flash 0x800000 build/generated_assets.bin
+    file(GLOB HUI_MANUALS CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/soa/manuals/*.json")
+    if(HUI_MANUALS)
+        if(DEFAULT_ASSETS_EXTRA_FILES)
+            # --extra_files 只收 1 个目录; 两个来源同时要就得先合并目录。
+            # (目前只有 ESP-HI 会占这个变量, 与 SOA 板互斥, 所以先只告警。)
+            message(WARNING
+                "DEFAULT_ASSETS_EXTRA_FILES is already set (${DEFAULT_ASSETS_EXTRA_FILES}); "
+                "HUI manuals (${CMAKE_CURRENT_SOURCE_DIR}/soa/manuals) will NOT be packed "
+                "into the assets partition. Merge the directories if both are needed.")
+        else()
+            list(APPEND DEFAULT_ASSETS_EXTRA_FILES "${CMAKE_CURRENT_SOURCE_DIR}/soa/manuals")
+            list(LENGTH HUI_MANUALS HUI_MANUALS_COUNT)
+            message(STATUS "HUI manuals -> assets partition: ${HUI_MANUALS_COUNT} file(s)")
+        endif()
+    endif()
 endif()
 
 set(MAIN_PRIV_REQUIRES_EXTRA "")
@@ -1318,6 +1341,13 @@ endif()
 
 # Function to build default assets based on configuration
 function(build_default_assets_bin)
+    # 用 IDF 自己的 python 解释器 (idf.py 会以绝对路径传入).
+    # ⚠️ 别写成字面量 "python": ninja 是用 cmd.exe 起这条自定义命令的, 而 Windows 上
+    # cmd.exe 里未必找得到 python —— 会直接报
+    #   'python' is not recognized as an internal or external command
+    # 然后 FAILED: generated_assets.bin, 整次构建挂掉 (2026-09-26 踩过)。
+    idf_build_get_property(assets_python PYTHON)
+
     # Set output path for generated assets.bin
     set(GENERATED_ASSETS_BIN "${CMAKE_BINARY_DIR}/generated_assets.bin")
     set(DEFAULT_ASSETS_DEPENDENCIES
@@ -1370,7 +1400,7 @@ function(build_default_assets_bin)
     # Create custom command to build assets
     add_custom_command(
         OUTPUT ${GENERATED_ASSETS_BIN}
-        COMMAND python ${PROJECT_DIR}/scripts/build_default_assets.py ${BUILD_ARGS}
+        COMMAND "${assets_python}" ${PROJECT_DIR}/scripts/build_default_assets.py ${BUILD_ARGS}
         DEPENDS ${DEFAULT_ASSETS_DEPENDENCIES}
         COMMENT "Building default assets.bin based on configuration"
         VERBATIM

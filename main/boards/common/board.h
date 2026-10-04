@@ -76,6 +76,18 @@ public:
     virtual NetworkInterface* GetNetwork() = 0;
     virtual void StartNetwork() = 0;
     virtual void SetNetworkEventCallback(NetworkEventCallback callback) { (void)callback; }
+
+    /**
+     * @brief 协议连接前的准备, 在 InitializeProtocol() 之前、激活任务里调用一次。
+     *
+     * 用它赶在后端第一次 tools/list 之前把动态生成的 MCP 工具注册好: 实测后端在
+     * 协议连上后约 190ms 就会问 tools/list, 那时再注册已经赶不上; 而后端不一定
+     * 理会 notifications/tools/list_changed, 漏了就等于工具不存在。
+     *
+     * ⚠️ 允许阻塞 (OTA 与网络此时已就绪, 只是还没连协议), 但会推迟联网, 实现要保持短小。
+     */
+    virtual void PrepareBeforeConnect() {}
+
     virtual const char* GetNetworkStateIcon() = 0;
     virtual bool GetBatteryLevel(int &level, bool& charging, bool& discharging);
     virtual std::string GetSystemInfoJson();

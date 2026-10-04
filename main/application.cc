@@ -371,6 +371,12 @@ void Application::ActivationTask() {
     // Check for new firmware version
     CheckNewVersion();
 
+    // 协议连接前的准备 (例如按 HUI 主机手册生成 MCP 工具)。
+    // 必须卡在 InitializeProtocol() 之前: 后端连上后约 190ms 就会问 tools/list,
+    // 晚于那时注册的工具赶不上第一次响应, 而后端不一定理会
+    // notifications/tools/list_changed。允许阻塞, 但会推迟联网。
+    Board::GetInstance().PrepareBeforeConnect();
+
     // Initialize the protocol
     InitializeProtocol();
 

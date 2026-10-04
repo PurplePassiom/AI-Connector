@@ -16,6 +16,31 @@
 #include "freertos/timers.h"
 #include "can_bus.h"
 
+#include <esp_log.h>
+
+#define TAG "SoaCan"
+
+/*
+ * 订阅的 transfer-ID 超时。
+ *
+ * canard 只接受"期望的下一个 transfer-ID"(严格的 +1), 不匹配的帧会被**静默丢弃**
+ * (canard.c 的 rxSessionUpdate: correct_tid)。唯一的绕行是超时路径:
+ * rxSessionSynchronize 认为"距上一次成功接收超过 transfer_id_timeout_usec"时,
+ * 允许用同一个 transfer-ID 重启接收会话。
+ *
+ * ⇒ 如果对端的应答 transfer-ID 不递增, 第一帧之后的所有应答都会被丢掉, 只有间隔
+ *   超过这个超时的那些才收得下。现场表现就是"CAN 卡上明明有应答, 固件却次次报
+ *   超时"。调小它可以让"重复 TID 的"对端也能被立刻接受。
+ *
+ * 默认 2000 ms = CANARD_DEFAULT_TRANSFER_ID_TIMEOUT_USEC, 即保持库的原始行为。
+ */
+#ifndef CONFIG_SOA_CAN_TRANSFER_ID_TIMEOUT_MS
+#define CONFIG_SOA_CAN_TRANSFER_ID_TIMEOUT_MS 2000
+#endif
+
+#define SOA_CAN_TID_TIMEOUT_USEC_ \
+    ((CanardMicrosecond)(CONFIG_SOA_CAN_TRANSFER_ID_TIMEOUT_MS) * 1000ULL)
+
 /* ---- Per-instance constants ---- */
 #define SOC_CYCLE_5MS               0x01U
 #define TX_CONFIRM_EVENT            0x02U
@@ -163,6 +188,15 @@ static void ring_push(uint32_t ext_id, uint8_t dlc, const uint8_t* data)
 
 /* ---- RX processing: one frame -> all active instances ---- */
 
+/* CAN ID 字段位置, 与 canard.c 保持一致 (仅用于下面的诊断日志) */
+#define CAN_ID_FLAG_SERVICE    (UINT32_C(1) << 25U)
+#define CAN_ID_FLAG_REQUEST    (UINT32_C(1) << 24U)
+#define CAN_ID_OFF_DST_NODE    7U
+#define CAN_ID_OFF_SERVICE_ID  14U
+#define CAN_ID_NODE_ID_MAX     0x7FU
+#define CAN_ID_SERVICE_ID_MAX  0x1FFU
+#define CAN_TAIL_TID_MAX       0x1FU
+
 static void process_rx_frame(const CanRxFrame* f)
 {
     struct CanardFrame frame;
@@ -177,14 +211,32 @@ static void process_rx_frame(const CanRxFrame* f)
         Soa_CanInstance* ci = &can_inst[i];
         if (!ci->active) continue;
 
+        /*
+         * 诊断打点: 凡是"发给本节点的服务帧"都记一行。本节点在自己的服务里只当
+         * 客户端, 所以这基本就等于"我们发出的请求的应答"。
+         *
+         * 为什么必须打: canard 遇到不匹配的帧 (transfer-ID 不是期望的下一个、toggle
+         * 不对、没有对应订阅) 时是**静默丢弃**的 —— 既不回调也不报错。少了这行日志
+         * 就分不清"对端没回"和"回了但传输层没收下", 而这两种情况现场表现完全一样
+         * (固件报超时, 但 CAN 卡上能看到应答帧)。2026-09-26 就在这里迷过路。
+         *
+         * 流量: 每个事务 1 帧, 可以忽略。
+         */
+        const bool     is_service_frame  = (f->ext_id & CAN_ID_FLAG_SERVICE) != 0;
+        const bool     addressed_to_self = is_service_frame &&
+                                           (((f->ext_id >> CAN_ID_OFF_DST_NODE) & CAN_ID_NODE_ID_MAX) ==
+                                            ci->canard.node_id);
+
         struct CanardRxSubscription* subscription;
         struct CanardRxTransfer rx_transfer;
         const int8_t result = canardRxAccept(&ci->canard, now,
                                              &frame, 0,
                                              &rx_transfer, &subscription);
+
+        message_service_callback rx_cb = NULL;
         if (result == 1)
         {
-            message_service_callback rx_cb = find_callback(
+            rx_cb = find_callback(
                 ci,
                 rx_transfer.metadata.remote_node_id,
                 rx_transfer.metadata.port_id,
@@ -196,6 +248,31 @@ static void process_rx_frame(const CanRxFrame* f)
             }
             ci->canard.memory.deallocate(NULL, 0,
                 rx_transfer.payload.data);
+        }
+
+        if (addressed_to_self)
+        {
+            const uint8_t  tail        = (f->dlc > 0U) ? f->data[f->dlc - 1U] : 0U;
+            const uint16_t service_id  = (uint16_t)((f->ext_id >> CAN_ID_OFF_SERVICE_ID) & CAN_ID_SERVICE_ID_MAX);
+            const uint8_t  src_node    = (uint8_t)(f->ext_id & CAN_ID_NODE_ID_MAX);
+            const uint8_t  transfer_id = (uint8_t)(tail & CAN_TAIL_TID_MAX);
+            const char*    kind        = (f->ext_id & CAN_ID_FLAG_REQUEST) ? "req" : "resp";
+
+            if ((result == 1) && (rx_cb != NULL))
+            {
+                ESP_LOGI(TAG, "RX svc=%u %s src=%u ext_id=0x%08X tid=%u → 已交付应用",
+                         (unsigned)service_id, kind, (unsigned)src_node,
+                         (unsigned)f->ext_id, (unsigned)transfer_id);
+            }
+            else
+            {
+                ESP_LOGW(TAG,
+                         "RX svc=%u %s src=%u ext_id=0x%08X tid=%u → **没被收货** "
+                         "(canard=%d, 回调=%s)",
+                         (unsigned)service_id, kind, (unsigned)src_node,
+                         (unsigned)f->ext_id, (unsigned)transfer_id, (int)result,
+                         (rx_cb != NULL) ? "有" : "无");
+            }
         }
     }
 }
@@ -386,7 +463,7 @@ int8_t soa_can_subscribe(uint8_t own_node, uint8_t from_node, Soa_MessageType ty
 
     portENTER_CRITICAL(&soa_can_tx_lock);
     int8_t result = canardRxSubscribe(&ci->canard, type, expect_id, max_size,
-                                      CANARD_DEFAULT_TRANSFER_ID_TIMEOUT_USEC,
+                                      SOA_CAN_TID_TIMEOUT_USEC_,
                                       &ci->subs[ci->sub_index++]);
     portEXIT_CRITICAL(&soa_can_tx_lock);
     if (result >= 0)

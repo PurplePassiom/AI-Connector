@@ -9,10 +9,15 @@
  *      本文件只碰总线上自己的状态, 不碰 Application/音频。
  *   3. 协同休眠 (SleepMgr) 已从本工程移除, 所以 SlaveHeartbeat 的字段目前由
  *      本文件自己维护 (见下面的 s_hb_*)。等休眠协调回来时改成从 SleepMgr 取即可。
+ *   4. **SlaveHeartbeat 必须 serialize_ 后再发** (统一走 HuiNode_SendHeartbeat):
+ *      线上是 7 字节打包格式, 而 sizeof(struct) 是 8 —— 4 个 1 字节枚举 + session_id
+ *      后面有 1 字节对齐填充, count 在结构体里位于偏移 6、在线上位于偏移 5。
+ *      直接发结构体会把填充字节当成 count 发出去。其他 DSDL 消息同理。
  */
 
 #include "hui.h"
 
+#include "hui_rpc.h"
 #include "soa.h"
 #include "soa_types.h"
 
@@ -73,27 +78,83 @@ static bool s_initialized = false;
 
 /* ===================== 发送: SlaveHeartbeat ===================== */
 
+/**
+ * @brief 把一个 SlaveHeartbeat 序列化后发到中央 ECU。
+ *
+ * ⚠️ 必须走 dsdl_..._serialize_(), 不能把结构体指针 + sizeof() 直接丢给
+ *    soa_request_send(): 线上是 **7 字节打包**格式, 而
+ *    sizeof(dsdl_Common_SlaveHeartbeat_1_0) == 8, 且 count 的偏移也不同
+ *    (结构体 6 / 线上 5) —— 直接发结构体会把对齐填充当成 count 发出去。
+ */
+static bool HuiNode_SendHeartbeat(const dsdl_Common_SlaveHeartbeat_1_0* hb)
+{
+    uint8_t buf[dsdl_Common_SlaveHeartbeat_1_0_SERIALIZATION_BUFFER_SIZE_BYTES_];
+    size_t  size = sizeof(buf);
+    if (dsdl_Common_SlaveHeartbeat_1_0_serialize_(hb, buf, &size) < 0)
+    {
+        ESP_LOGW(TAG, "SlaveHeartbeat 序列化失败");
+        return false;
+    }
+    return soa_request_send(HUI_NODE_ID, MASTER_NODE_ID,
+                            (uint16_t)dsdl_Common_SlaveHeartbeat_1_0_FIXED_PORT_ID_,
+                            buf, size) == SOA_OK;
+}
+
+/** @brief 组一个本节点 SlaveHeartbeat 的骨架 (health / session / count 取共享状态)。 */
+static void HuiNode_FillHeartbeat(dsdl_Common_SlaveHeartbeat_1_0* hb)
+{
+    memset(hb, 0, sizeof(*hb));
+    hb->health.value = s_hb_health;
+    hb->session_id   = s_hb_session_id;
+    hb->count        = ++s_hb_count;
+}
+#if 0
 static void HuiNode_PublishHeartbeat(void)
 {
     dsdl_Common_SlaveHeartbeat_1_0 hb;
-    memset(&hb, 0, sizeof(hb));
+    HuiNode_FillHeartbeat(&hb);
     hb.mode.value         = dsdl_Common_PowerMode_1_0_WORKING;
-    hb.health.value       = s_hb_health;
     hb.sleep_reason.value = dsdl_Common_SleepReason_1_0_NONE;
     hb.wake_reason.value  = dsdl_Common_WakeReason_1_0_NONE;
-    hb.session_id         = s_hb_session_id;
-    hb.count              = ++s_hb_count;
 
-    uint8_t buf[dsdl_Common_SlaveHeartbeat_1_0_SERIALIZATION_BUFFER_SIZE_BYTES_];
-    size_t  size = sizeof(buf);
-    if (dsdl_Common_SlaveHeartbeat_1_0_serialize_(&hb, buf, &size) < 0)
+    (void)HuiNode_SendHeartbeat(&hb);
+}
+#endif
+
+bool HuiNode_RequestHostSleep(void)
+{
+    /* 主机不在 WORKING 时请求休眠没有意义: 要么它已经在睡, 要么状态还不知道。
+       这种时候发出去是无效请求, 所以直接返回 false 让调用方如实告知用户, */
+    if (s_host_mode_last != dsdl_Host_HostHeartbeat_1_0_HOST_MODE_WORKING)
     {
-        ESP_LOGW(TAG, "SlaveHeartbeat 序列化失败");
-        return;
+        ESP_LOGW(TAG, "忽略休眠请求: 主机不在 WORKING 模式 (当前 mode=%u)",
+                 (unsigned)s_host_mode_last);
+        return false;
     }
 
-    soa_request_send(HUI_NODE_ID, MASTER_NODE_ID, (uint16_t)dsdl_Common_SlaveHeartbeat_1_0_FIXED_PORT_ID_,
-                buf, size);
+    dsdl_Common_SlaveHeartbeat_1_0 hb;
+    HuiNode_FillHeartbeat(&hb);
+    hb.mode.value         = dsdl_Common_PowerMode_1_0_SLEEP_REQUESTED;
+    hb.sleep_reason.value = dsdl_Common_SleepReason_1_0_USER_REQUEST;
+    hb.wake_reason.value  = dsdl_Common_WakeReason_1_0_NONE;
+
+    const bool sent = HuiNode_SendHeartbeat(&hb);
+    ESP_LOGI(TAG, "HUI 请求主机休眠: %s", sent ? "已发出" : "发送失败");
+    return sent;
+}
+
+bool HuiNode_RequestHostWakeup(void)
+{
+    /* 唤醒**无条件**发: 主机可能正在睡 (mode != WORKING), 而那正是要唤醒它的场景 */
+    dsdl_Common_SlaveHeartbeat_1_0 hb;
+    HuiNode_FillHeartbeat(&hb);
+    hb.mode.value         = dsdl_Common_PowerMode_1_0_WAKING;
+    hb.sleep_reason.value = dsdl_Common_SleepReason_1_0_NONE;
+    hb.wake_reason.value  = dsdl_Common_WakeReason_1_0_USER_REQUEST;
+
+    const bool sent = HuiNode_SendHeartbeat(&hb);
+    ESP_LOGI(TAG, "HUI 请求主机唤醒: %s", sent ? "已发出" : "发送失败");
+    return sent;
 }
 
 /* ===================== 接收: HostHeartbeat ===================== */
@@ -142,15 +203,28 @@ void HuiNode_SendReadRequest(uint16_t sub_service)
                      (uint16_t)dsdl_CenterAndHui_HuiRead_1_0_FIXED_PORT_ID_, buf, size);
 }
 
+/**
+ * 三个应答回调都跑在传输层任务里 (CAN 任务)。这里只做反序列化 + 把结果交给
+ * HuiRpc (它在状态锁保护下落数据并唤醒等待中的事务), 不做任何重活。
+ */
 static void HuiNode_OnHuiReadResponse(const uint8_t* data, size_t data_len)
 {
-
+    dsdl_CenterAndHui_HuiRead_Response_1_0 resp;
+    memset(&resp, 0, sizeof(resp));
+    size_t size = data_len;
+    if (dsdl_CenterAndHui_HuiRead_Response_1_0_deserialize_(&resp, data, &size) < 0)
+    {
+        ESP_LOGW(TAG, "HuiRead.Response 反序列化失败 (%u 字节)", (unsigned)data_len);
+        return;
+    }
+    HuiRpc_OnResponse(HuiRpcKind_Read, resp._error, resp.data.elements, resp.data.count);
 }
 
 void HuiNode_SendWriteRequest(uint16_t sub_service, const uint8_t* payload, size_t payload_len)
 {
     dsdl_CenterAndHui_HuiWrite_Request_1_0 rqst;
     memset(&rqst, 0, sizeof(rqst));
+    rqst.sub_service = sub_service;
 
     uint8_t buf[dsdl_CenterAndHui_HuiWrite_Request_1_0_SERIALIZATION_BUFFER_SIZE_BYTES_];
     if (payload != nullptr && payload_len > 0)
@@ -173,7 +247,16 @@ void HuiNode_SendWriteRequest(uint16_t sub_service, const uint8_t* payload, size
 
 static void HuiNode_OnHuiWriteResponse(const uint8_t* data, size_t data_len)
 {
-
+    dsdl_CenterAndHui_HuiWrite_Response_1_0 resp;
+    memset(&resp, 0, sizeof(resp));
+    size_t size = data_len;
+    if (dsdl_CenterAndHui_HuiWrite_Response_1_0_deserialize_(&resp, data, &size) < 0)
+    {
+        ESP_LOGW(TAG, "HuiWrite.Response 反序列化失败 (%u 字节)", (unsigned)data_len);
+        return;
+    }
+    /* write 的应答只有错误码, 没有 data */
+    HuiRpc_OnResponse(HuiRpcKind_Write, resp._error, nullptr, 0);
 }
 
 void HuiNode_SendIoctlRequest(const uint8_t* payload, size_t payload_len)
@@ -202,7 +285,15 @@ void HuiNode_SendIoctlRequest(const uint8_t* payload, size_t payload_len)
 
 static void HuiNode_OnHuiIoctlResponse(const uint8_t* data, size_t data_len)
 {
-    //TODO: being handling ioctl response
+    dsdl_CenterAndHui_HuiIoctl_Response_1_0 resp;
+    memset(&resp, 0, sizeof(resp));
+    size_t size = data_len;
+    if (dsdl_CenterAndHui_HuiIoctl_Response_1_0_deserialize_(&resp, data, &size) < 0)
+    {
+        ESP_LOGW(TAG, "HuiIoctl.Response 反序列化失败 (%u 字节)", (unsigned)data_len);
+        return;
+    }
+    HuiRpc_OnResponse(HuiRpcKind_Ioctl, resp._error, resp.data.elements, resp.data.count);
 }
 
 /* ===================== 周期任务: 1 Hz SlaveHeartbeat ===================== */
@@ -225,6 +316,9 @@ void HuiNode_Init(void)
         ESP_LOGW(TAG, "HuiNode_Init() 重复调用, 忽略");
         return;
     }
+
+    /* 0. 同步 RPC 层 (read/write/ioctl 请求-应答配对) 必须在收到任何应答之前就绪 */
+    HuiRpc_Init();
 
     /* 1. 在 SOA 总线上建立本节点 (CAN only —— IPC / UART 暂不参与) */
     soa_create_node(HUI_NODE_ID, SOA_NODE_CAN);

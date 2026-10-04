@@ -1156,6 +1156,132 @@ menu "SOA (Service-Oriented Architecture)"
             The CAN pins are NOT configured here - each board passes them from its
             own config.h through can_bus_config_t.
 
+    config SOA_CAN_TRANSFER_ID_TIMEOUT_MS
+        int "SOA CAN subscription transfer-ID timeout (ms)"
+        depends on SOA_ENABLE
+        default 2000
+        range 0 60000
+        help
+            Canard 只接受"期望的下一个 transfer-ID"(严格 +1), 不匹配的帧会被**静默丢弃**。
+            唯一的绕行是超时路径: 距上次成功接收超过本值后, 同一个 transfer-ID 会被重新
+            接受。
+
+            所以对端如果复用 transfer-ID(很多手写的 CAN 服务端都这样), 第一帧之后的所有
+            应答都会被丢掉, 只有间隔超过本值的那些收得下 —— 现场表现就是"CAN 卡上明明
+            有应答, 固件却次次报超时"。
+
+            默认 2000 (= CANARD_DEFAULT_TRANSFER_ID_TIMEOUT_USEC, 库的原始行为)。
+            对端 TID 不递增时改小(如 100) 可以立即接受应答。
+
+    config HUI_MANUAL_URL
+        string "HUI command manual service URL (%s = device id)"
+        depends on SOA_ENABLE
+        default ""
+        help
+            HUI 命令手册 (JSON) 的服务端地址。手册来源由下面的 HUI_MANUAL_SOURCE 决定:
+            默认是"先查 flash, 没找到才联网", 所以只在 flash 里没有对应主机时才需要这个地址。
+
+            设备启动后会:
+              1) read 1000 读回 2 字节大端设备 ID (例如 "0001")
+              2) 按设备 ID 找手册 (flash 里的 assets 分区 → 找不到再 HTTP)
+              3) 把手册转成 self.hui.<主机>.<命令> 开头的具体 MCP 工具
+
+            URL 里的 %s 会被替换成设备 ID; 没有 %s 时改为追加 "?device_id=<id>"。
+            手册只缓存在 RAM, 不写 NVS; 失效后会自动重新加载。
+
+    choice HUI_MANUAL_SOURCE
+        prompt "HUI command manual source"
+        depends on SOA_ENABLE
+        default HUI_MANUAL_SOURCE_FLASH_FIRST
+        help
+            手册可以从两个地方来:
+              * 固件 flash: main/soa/manuals/*.json 会被打进 assets 分区, 不联网也能用
+              * HTTP: CONFIG_HUI_MANUAL_URL 指定的服务端
+
+        config HUI_MANUAL_SOURCE_FLASH_FIRST
+            bool "Flash first, then HTTP"
+            help
+                先按设备 ID 在 assets 分区里找; 没找到才去联网拉。
+                台架/离线场景靠 flash; 以后有自己的服务端了, 不用改代码就能
+                用服务端覆盖或补充主机 (服务端优先权低于 flash —— 想反转就选 HTTP_ONLY)。
+
+        config HUI_MANUAL_SOURCE_FLASH_ONLY
+            bool "Flash only (never use the network)"
+            help
+                只用 flash 里的手册, 完全不联网 —— HUI_MANUAL_URL 可以不配。
+                适合已定型的车/台架: 手册跟着固件一起出厂。
+
+        config HUI_MANUAL_SOURCE_HTTP_ONLY
+            bool "HTTP only (ignore the copies packed in flash)"
+            help
+                忽略 flash 里打包的手册, 只信任服务端。
+                服务端当唯一权威来源时选它。
+    endchoice
+
+    config HUI_RPC_TIMEOUT_MS
+        int "HUI read/write/ioctl response timeout (ms)"
+        depends on SOA_ENABLE
+        default 1500
+        range 50 10000
+        help
+            每个 HUI 事务等主机应答的时间。
+
+            ⚠️ 不要贴着真实往返时间调。2026-09-26 在 es8311-ml307-4g-voice 台架上用 CAN 卡
+            实测: 中央 ECU 对 read 1000 的应答就在请求后 7 ms 左右。如果把这个值调到跟它
+            同一量级, 就会出现"响应偏慢就判超时" —— 而一旦出现超时, 后续事务的应答会被
+            误当成"上一次迟到的应答"丢掉, 表现为持续性超时(已由静默收帧机制修掉)。
+            留足余量: 1500 是安全值。
+
+    config HUI_RPC_DRAIN_MS
+        int "HUI late-reply drain window after a timeout (ms)"
+        depends on SOA_ENABLE
+        default 200
+        range 0 5000
+        help
+            Hui{Read,Write,Ioctl}.Response 里没有回显命令号, 所以收到一帧应答时无法
+            判断它属于哪个请求。上一次事务超时后, 发下一个请求前先静默这么长时间, 把可能
+            迟到的应答收干净(此期间到达的帧会被当作无主应答忽略), 然后才开始新事务。
+
+            为什么不能改成"直接丢掉下一个应答": 那帧迟到的应答一旦永远不来, 就会把下一
+            个事务自己的应答也丢掉 —— 之后每次事务都丢自己的应答, 链路永久坏死, 现象是
+            "总线上源源不断有应答, 固件 100% 报超时"。
+
+            0 = 不等待(不推荐, 会重新引入错配风险)。
+
+    config HUI_RPC_SELFTEST
+        bool "Run a HUI read self-test at boot (bring-up only)"
+        depends on SOA_ENABLE
+        default n
+        help
+            启动时连做 3 次 read 1000, 每次把结果打一行日志。仅用于 bring-up 排查。
+
+            它能一眼区分两件事: "对端根本没回" 与 "回了但传输层没收下"。后者在 CAN 卡
+            上能看到应答帧, 但固件报超时 —— 配合 soa_oncan.c 的 "RX svc=..." 日志看。
+            正常固件保持关闭。
+
+    config HUI_MANUAL_MAX_BYTES
+        int "Max HUI command manual size (bytes)"
+        depends on SOA_ENABLE
+        default 8192
+        range 512 65536
+        help
+            手册响应的字节上限, 超过就当成坏响应丢弃。注意 tools/list 单页上限是
+            8000 字节, 手册太大时工具描述会自动截断 (见 main/soa/hui_mcp.cc)。
+
+    config HUI_MANUAL_READ_TIMEOUT_MS
+        int "Timeout for the HUI read 1000 device-ID probe (ms)"
+        depends on SOA_ENABLE
+        default 2000
+        range 100 10000
+        help
+            加载命令手册前那次 read 1000 的超时, 与工具调用的 HUI_RPC_TIMEOUT_MS 分开。
+
+            手册加载是启动路径上的一次性阻塞调用 (发生在连协议之前, 详见
+            Board::PrepareBeforeConnect), 车机上电顺序可能让中央 ECU 慢一拍, 所以默认
+            给 2s 余量。读不到就本次放弃, 只注册本机工具 —— 不重试, 因为后端在协议连上
+            后约 190ms 就发 tools/list, 补注册已经赶不上, 而它不理会
+            notifications/tools/list_changed。
+
 endmenu
 
 endmenu

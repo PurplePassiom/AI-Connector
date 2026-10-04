@@ -390,6 +390,11 @@ void McpServer::ParseMessage(const cJSON* json, ResponseSender response_sender) 
     }
     auto id_int = id->valueint;
 
+    /* MCP 侧的请求原本在串口里完全静默 —— 排查 "AI 看不到工具" 时最需要知道的
+     * 就是后端到底有没有发 tools/list。这里每个请求记一行 (notifications 上面已早退,
+     * 不会刷屏)。 */
+    ESP_LOGI(TAG, "MCP 请求: %s (id=%d)", method_str.c_str(), (int)id_int);
+
     if (method_str == "initialize") {
         if (cJSON_IsObject(params)) {
             auto capabilities = cJSON_GetObjectItem(params, "capabilities");
@@ -486,6 +491,7 @@ void McpServer::GetToolsList(int id, const std::string& cursor, bool list_user_o
     bool found_cursor = cursor.empty();
     auto it = tools_.begin();
     std::string next_cursor = "";
+    size_t listed = 0;
 
     while (it != tools_.end()) {
         // 如果我们还没有找到起始位置，继续搜索
@@ -512,6 +518,7 @@ void McpServer::GetToolsList(int id, const std::string& cursor, bool list_user_o
         }
 
         json += tool_json;
+        listed++;
         ++it;
     }
 
@@ -533,6 +540,14 @@ void McpServer::GetToolsList(int id, const std::string& cursor, bool list_user_o
     } else {
         json += "],\"nextCursor\":\"" + next_cursor + "\"}";
     }
+
+    /* 记一笔返回了多少工具 —— 排查 "AI 看不到某个工具" 时, 这行就是设备侧的事实: */
+    std::string page_note;
+    if (!next_cursor.empty()) {
+        page_note = " (还有下一页, nextCursor=" + next_cursor + ")";
+    }
+    ESP_LOGI(TAG, "tools/list -> %u 个工具, %u 字节%s%s", (unsigned)listed, (unsigned)json.size(),
+             list_user_only_tools ? " (含 user 工具)" : "", page_note.c_str());
 
     ReplyResult(id, json, response_sender);
 }

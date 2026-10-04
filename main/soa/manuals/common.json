@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "device_id": "",
+  "name": "通用命令",
+  "description": "所有 HUI 主机都必须支持的通用命令。后端下发具体主机手册时, 把这里的命令合并进 commands 数组即可 (固件本身也硬编码了 read 1000 用于读设备 ID)。注意: 手册里每条命令都会生成一个 self.hui.<alias>.<name> 工具, 所以通用命令也会变成工具。",
+  "commands": [
+    {
+      "id": "1000",
+      "kind": "read",
+      "name": "get_device_id",
+      "description": "获取设备 ID (通用命令)。返回 2 字节大端, 例如 00 01 → 设备 ID \"0001\"。固件用这个 ID 去服务端换取本主机的命令手册。",
+      "value": { "type": "hex", "bytes": 2 }
+    }
+  ]
+}

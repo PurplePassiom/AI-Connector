@@ -15,6 +15,7 @@
 // CAN 总线驱动 + HUI 节点（从 MIO 工程移植，见 main/soa/）
 #include "can_bus.h"
 #include "hui.h"
+#include "hui_mcp.h"
 #include "soa.h"
 #endif
 
@@ -239,6 +240,18 @@ public:
         // 先装上「网络事件」通知钩子；应用稍后会用真正的回调再调一次，行为不变
         net_event_group_ = xEventGroupCreate();
         SetNetworkEventCallback(nullptr);
+#endif
+    }
+
+    // 协议连接前的准备：按 HUI 主机命令手册生成 MCP 工具。
+    //
+    // 为什么必须在这里：后端在协议连上后约 190ms 就会发 tools/list，而它不理会
+    // notifications/tools/list_changed —— 晚于第一次 tools/list 注册的工具在 AI
+    // 眼里等于不存在。此刻 4G 已通、总线上电也已稳定，只是还没连协议。
+    // 内部会 read 1000（最多阻塞 2s，读不到就本次放弃，只注册本机工具）。
+    virtual void PrepareBeforeConnect() override {
+#if SOA_INIT_ON_BOOT
+        HuiMcp_Init();
 #endif
     }
 

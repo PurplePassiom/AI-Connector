@@ -227,6 +227,9 @@ public:
 
     auto begin() { return properties_.begin(); }
     auto end() { return properties_.end(); }
+    // const 版本: 按手册生成的工具在编解码时只拿到 const PropertyList&
+    auto begin() const { return properties_.begin(); }
+    auto end() const { return properties_.end(); }
 
     std::vector<std::string> GetRequired() const {
         std::vector<std::string> required;

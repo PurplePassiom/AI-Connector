@@ -162,8 +162,18 @@
 // 上电就拉起 SOA 框架（router + CAN/IPC/UART 传输层）并让 HUI 节点上线
 //   0 = 只初始化 CAN 驱动（收发 CAN 帧可用，但不建 HUI 节点、不发心跳）
 //   1 = 额外调用 soa_init() + HuiNode_Init()
+// 按主机命令手册生成的 MCP 工具不在这里注册，而是走 Board::PrepareBeforeConnect()
+// （连协议之前），详见 main/soa/hui_mcp.h。
 // HUI 节点号见 main/soa/soa_types.h 的 HUI_NODE_ID（当前 6）。
 #define SOA_INIT_ON_BOOT        1
+
+// ===== HUI 命令手册来源 =====
+// 默认走 flash（main/soa/manuals/*.json 打进 assets 分区，无网也能用）。
+// 以后有了自己的服务器，把 Kconfig 的 HUI_MANUAL_SOURCE 切成 HTTP_ONLY/FLASH_FIRST，
+// 并在目录级 config.json 的 sdkconfig_append 里加一行（%s = 设备 ID）：
+//   "CONFIG_HUI_MANUAL_URL=\"http://<服务器>/api/hui/manual?device_id=%s\""
+// 只用 flash 时 CONFIG_HUI_MANUAL_URL 留空即可，不需要配。
+// 手册（参考数据）见 main/soa/manuals/ 与 docs/hui-command-manual_zh.md。
 
 // ===== 已引出但固件暂未使用，仅作引脚记录 =====
 // USB 控制台 (USB-Serial/JTAG)：D- = GPIO19 / D+ = GPIO20（必须保留，不可挪用）
