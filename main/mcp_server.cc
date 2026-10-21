@@ -8,6 +8,7 @@
 #include <esp_log.h>
 #include <esp_pthread.h>
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <iterator>
 
@@ -19,6 +20,9 @@
 #include "settings.h"
 
 #define TAG "MCP"
+
+/* CallTool() 给请求编号, 只用于回执配对 (每条通道各自消费自己的回执) */
+static std::atomic<int> s_call_request_id{0};
 
 McpServer::McpServer() {}
 
@@ -447,6 +451,33 @@ void McpServer::ParseMessage(const cJSON* json, ResponseSender response_sender) 
         ESP_LOGE(TAG, "Method not implemented: %s", method_str.c_str());
         ReplyError(id_int, -32601, "Method not implemented: " + method_str, response_sender);
     }
+}
+
+void McpServer::CallTool(const std::string& name, const cJSON* tool_arguments,
+                         ResponseSender response_sender) {
+    cJSON* request = cJSON_CreateObject();
+    cJSON* params = request != nullptr ? cJSON_AddObjectToObject(request, "params") : nullptr;
+    if (params == nullptr) {
+        ESP_LOGE(TAG, "CallTool: 内存不足, 请求被丢弃");
+        cJSON_Delete(request);
+        return;
+    }
+    const int request_id = ++s_call_request_id;
+    cJSON_AddStringToObject(request, "jsonrpc", "2.0");
+    cJSON_AddNumberToObject(request, "id", request_id);
+    cJSON_AddStringToObject(request, "method", "tools/call");
+    cJSON_AddStringToObject(params, "name", name.c_str());
+    if (tool_arguments != nullptr) {
+        /* 原样带上 (包括类型不对的): 让 ParseMessage 按 MCP 规则回 -32602 */
+        cJSON* copied = cJSON_Duplicate(tool_arguments, 1);
+        if (copied != nullptr) {
+            cJSON_AddItemToObject(params, "arguments", copied);
+        }
+    }
+
+    ESP_LOGI(TAG, "CallTool: %s (id=%d)", name.c_str(), request_id);
+    ParseMessage(request, std::move(response_sender));
+    cJSON_Delete(request);
 }
 
 void McpServer::SendResponse(const std::string& payload, const ResponseSender& response_sender) {

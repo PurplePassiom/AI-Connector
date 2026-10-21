@@ -8,6 +8,7 @@
 #include "mqtt_protocol.h"
 #include "settings.h"
 #include "system_info.h"
+#include "tbox_link.h"
 #include "text_glyph_payload.h"
 #include "websocket_protocol.h"
 
@@ -382,6 +383,11 @@ void Application::ActivationTask() {
 
     // Signal completion to main loop
     xEventGroupSetBits(event_group_, MAIN_EVENT_ACTIVATION_DONE);
+
+    /* TBOX 专用链路 (方案 B): 另开一条独立 MQTT 连接连到 TBOX 服务器, 与 AI 云解耦。
+     * 故意放在置位之后 —— 连接要等模组的 AT/URC 往返 (可能几秒), 不能拖住激活流程,
+     * 否则主循环 (音频/显示) 迟迟不开始。本任务随后由 vTaskDelete 结束。 */
+    TboxLink_Start();
 }
 
 void Application::CheckAssetsVersion() {
@@ -684,7 +690,26 @@ void Application::InitializeProtocol() {
             if (cJSON_IsObject(payload)) {
                 McpServer::GetInstance().ParseMessage(payload);
             }
-        } else if (strcmp(type->valuestring, "system") == 0) {
+        }
+#if CONFIG_TBOX_COMMAND_MESSAGE
+        else if (strcmp(type->valuestring, "command") == 0) {
+            /* TBOX 侧 (人在服务器端选好命令) 下发的单条命令 —— 走 AI 通道的版本,
+             * 供台架/应急使用。生产用的独立通道版本在 main/tbox_link.cc (方案 B),
+             * 两者都调用 McpServer::CallTool, 与 AI 自己调用走完全同一条路径:
+             * 同一张工具表、同一份 Property 校验、同一份手册字节编码、同一道安全门槛。
+             *   {"type":"command","name":"self.hui.host1.set_headlight",
+             *    "arguments":{"on":1}}
+             * 回执仍按普通 MCP 应答 (type: mcp) 发回服务器。 */
+            auto name = cJSON_GetObjectItem(root, "name");
+            if (!cJSON_IsString(name)) {
+                ESP_LOGW(TAG, "Command message has no name");
+                return;
+            }
+            McpServer::GetInstance().CallTool(name->valuestring,
+                                             cJSON_GetObjectItem(root, "arguments"));
+        }
+#endif
+        else if (strcmp(type->valuestring, "system") == 0) {
             auto command = cJSON_GetObjectItem(root, "command");
             if (cJSON_IsString(command)) {
                 ESP_LOGI(TAG, "System command: %s", command->valuestring);

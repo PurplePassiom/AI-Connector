@@ -34,6 +34,8 @@ set(SOURCES "audio/audio_codec.cc"
             "protocols/mqtt_protocol.cc"
             "protocols/websocket_protocol.cc"
             "mcp_server.cc"
+            "tbox_link.cc"
+           
             "system_info.cc"
             "application.cc"
             "ota.cc"

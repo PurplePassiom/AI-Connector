@@ -6,6 +6,91 @@ config OTA_URL
     help
         The application will access this URL to check for new firmwares and server address.
 
+config TBOX_COMMAND_MESSAGE
+    bool "Accept TBOX remote command messages (type: command)"
+    default n
+    help
+        允许服务器下发单条命令, 由固件直接执行:
+          {"type":"command","name":"self.hui.host1.set_headlight","arguments":{"on":1}}
+
+        固件只把它翻译成标准 MCP tools/call 再交给 McpServer, 因此参数校验 (Property
+        范围/长度)、手册的字节编码、以及工具内部的安全门槛 (例如只有中央 ECU 处于
+        WORKING 才允许休眠) 与 AI 自己调用时完全一致 —— 不存在第二条绕过校验的执行
+        路径。回执按普通 MCP 应答 (type: mcp) 发回服务器。
+
+        用途: TBOX + AIBOX 二合一产品中 "人在服务器端选择执行" 的那条路径。
+        关闭时该 type 的消息被忽略, 行为与上游一致。
+
+        注意: 这个开关把命令走**AI 那条通道**。真正与 AI 云解耦的版本是下面的
+        TBOX_LINK_ENABLE (另开一条独立连接)。两者可以同时开。
+
+config TBOX_LINK_ENABLE
+    bool "Enable the independent TBOX link (separate connection to the TBOX server)"
+    default n
+    help
+        设备另开一条**独立**连接连到 TBOX 服务器 (TCP/可选 TLS + 行分隔 JSON), 与 AI 云
+        (OTA 下发的 mqtt/websocket 配置) 完全解耦 —— AI 云不可用不影响控车, TBOX 服务器
+        也拿不到 AI 那条会话。这是 TBOX + AIBOX 二合一产品的生产形态。
+
+        故意不用第二个 MQTT 客户端: ML307 的 `MQTTSTATE` URC 不带客户端编号, 两个
+        Ml307Mqtt 实例会互相把 `connected_` 清成 false, 导致其中一个彻底发不出去
+        (2026-10-05 真机实测)。TCP 的 URC 带 id, 多路复用安全。
+
+        链路契约与 AI 通道一致, 两条都收敛到 McpServer 同一张工具表:
+          收 {"type":"command","name":"self.hui.host1.set_headlight","arguments":{"on":1}}
+             {"type":"mcp","payload":{ ...标准 JSON-RPC... }}  或裸 JSON-RPC
+          发 {"type":"mcp","payload":{ ...JSON-RPC 应答... }}
+        连接后设备先发一行 hello 说明自己是谁。
+
+        下面的端点/身份可以用 NVS 命名空间 "tbox" 覆盖
+        (endpoint / channel / client_id / token / ping), 出厂后不需要重新编译。
+
+config TBOX_LINK_ENDPOINT
+    string "TBOX server endpoint (host:port)"
+    depends on TBOX_LINK_ENABLE
+    default ""
+    help
+        TBOX 服务器的 TCP 地址。开 TBOX_LINK_TLS 时走 TLS (通常用 443/8443 之类的
+        端口), 否则明文 —— 明文只适合台架。
+
+config TBOX_LINK_TLS
+    bool "Use TLS for the TBOX link"
+    depends on TBOX_LINK_ENABLE
+    default n
+    help
+        用 esp-ml307 的 SSL 通道 (CreateSsl) 建立连接。证书校验策略取决于模组 /
+        组件配置, 生产环境上真实 TSP 前请先确认。
+
+config TBOX_LINK_CLIENT_ID
+    string "TBOX link client id (empty = device UUID)"
+    depends on TBOX_LINK_ENABLE
+    default ""
+    help
+        这台设备在 TBOX 服务器上的标识 (放进 hello 行), 例如 tbox-test。
+
+config TBOX_LINK_CHANNEL
+    string "TBOX link channel name"
+    depends on TBOX_LINK_ENABLE
+    default ""
+    help
+        逻辑通道名, 放进 hello 行; 服务器可以拿它路由/分组 (台架里就是原来的
+        "topic", 例如 tsp/dev/tbox-test)。
+
+config TBOX_LINK_TOKEN
+    string "TBOX link token (auth)"
+    depends on TBOX_LINK_ENABLE
+    default ""
+    help
+        放进 hello 行的凭据, 由服务器决定怎么校验。
+
+config TBOX_LINK_PING_SECONDS
+    int "TBOX link ping interval (seconds, 0 = off)"
+    depends on TBOX_LINK_ENABLE
+    default 60
+    range 0 3600
+    help
+        周期性发一行 {"type":"ping"} 做保活, 让服务器能发现半死连接。
+
 choice
     prompt "Flash Assets"
     default FLASH_DEFAULT_ASSETS if !USE_EMOTE_MESSAGE_STYLE

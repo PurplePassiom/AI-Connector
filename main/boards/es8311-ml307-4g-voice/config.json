@@ -8,6 +8,12 @@
                 "CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y",
                 "CONFIG_SPIRAM=n",
                 "CONFIG_SOA_ENABLE=y",
+                "CONFIG_TBOX_COMMAND_MESSAGE=y",
+                "CONFIG_TBOX_LINK_ENABLE=y",
+                "CONFIG_TBOX_LINK_ENDPOINT=\"134.175.25.107:9000\"",
+                "CONFIG_TBOX_LINK_CHANNEL=\"tsp/dev/tbox-test\"",
+                "CONFIG_TBOX_LINK_CLIENT_ID=\"tbox-test\"",
+                "CONFIG_TBOX_LINK_TOKEN=\"tsp\"",
                 "CONFIG_HUI_RPC_TIMEOUT_MS=1500",
                 "CONFIG_HUI_MANUAL_READ_TIMEOUT_MS=2000"
             ]

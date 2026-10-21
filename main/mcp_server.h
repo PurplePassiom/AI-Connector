@@ -441,6 +441,16 @@ public:
     void ParseMessage(const cJSON* json, ResponseSender response_sender = nullptr);
     void ParseMessage(const std::string& message, ResponseSender response_sender = nullptr);
 
+    /** 按名字执行一次工具调用 (等价于收到一条 tools/call)。
+     *
+     * response_sender 为 nullptr 时回执发给 AI 通道 (Application::SendMcpMessage);
+     * 传入自定义 sender 时回执走调用方自己的通道 (例如 TBOX 专用链路)。
+     *
+     * 参数校验 (-32602)、手册字节编码、工具内部的安全门槛全部复用 tools/call 那一条
+     * 路径, 不新增第二套执行逻辑 —— 这是有意为之: 车控场景不能有绕过校验的入口。 */
+    void CallTool(const std::string& name, const cJSON* tool_arguments,
+                  ResponseSender response_sender = nullptr);
+
 private:
     McpServer();
     ~McpServer();
