@@ -16,6 +16,7 @@ typedef enum {
     SOA_NODE_CAN     = 0,
     SOA_NODE_IPC     = 1,
     SOA_NODE_UART    = 2,
+    SOA_NODE_ESPNOW  = 3,
     SOA_NODE_UNKNOWN = 0xFF,
 } Soa_NodeType;
 
@@ -23,6 +24,7 @@ typedef enum {
     SOA_PATH_CAN     = 0,
     SOA_PATH_IPC     = 1,
     SOA_PATH_UART    = 2,
+    SOA_PATH_ESPNOW  = 3,
     SOA_PATH_UNKNOWN = 0xFF,
 } Soa_PathType;
 

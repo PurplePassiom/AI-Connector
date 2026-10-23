@@ -5,7 +5,8 @@
  * ⚠️ 实现须知 (踩过的坑, 不要改回去):
  *   1. 总线上与本节点有关的只有三件事: 发 SlaveHeartbeat、收 HostHeartbeat、
  *      发 HuiRead/Write/Ioctl 请求并处理它们的应答。
- *   2. 所有 SOA 回调都跑在**传输层的任务**里 (soa_oncan 的 CAN 任务), 不是主任务。
+ *   2. 所有 SOA 回调都跑在**传输层的任务**里 (走 CAN 时是 soa_oncan 的 CAN 任务,
+ *      走 ESP-NOW 时是 soa_espnow 的分发任务), 不是主任务。
  *      本文件只碰总线上自己的状态, 不碰 Application/音频。
  *   3. 协同休眠 (SleepMgr) 已从本工程移除, 所以 SlaveHeartbeat 的字段目前由
  *      本文件自己维护 (见下面的 s_hb_*)。等休眠协调回来时改成从 SleepMgr 取即可。
@@ -19,6 +20,7 @@
 
 #include "hui_rpc.h"
 #include "soa.h"
+#include "soa_onespnow.h"
 #include "soa_types.h"
 
 #include "Health_1_0.h"
@@ -320,14 +322,14 @@ void HuiNode_Init(void)
     /* 0. 同步 RPC 层 (read/write/ioctl 请求-应答配对) 必须在收到任何应答之前就绪 */
     HuiRpc_Init();
 
-    /* 1. 在 SOA 总线上建立本节点 (CAN only —— IPC / UART 暂不参与) */
-    soa_create_node(HUI_NODE_ID, SOA_NODE_CAN);
+    /* 1. 在 SOA 总线上建立本节点 (本板走 ESP-NOW; IPC / UART 不参与) */
+    soa_create_node(HUI_NODE_ID, SOA_NODE_ESPNOW);
 
     /* 1b. 登记路由。⚠️ 这一步不能省:
            soa_request_send() / soa_subscribe() 都要先在路由表里查到路径才肯干活,
            查不到就直接返回 SOA_NOT_OK (只有 subscribe_broadcast 不走路由表)。
-           写法与 MIO 各节点 Init 一致 —— MIO 的 AI agent 走 UART, 本板改走 CAN。 */
-    soa_create_route_path(HUI_NODE_ID, MASTER_NODE_ID, SOA_PATH_CAN);
+           写法与 MIO 各节点 Init 一致 —— MIO 的 AI agent 走 UART, 本板改走 ESP-NOW。 */
+    soa_create_route_path(HUI_NODE_ID, MASTER_NODE_ID, SOA_PATH_ESPNOW);
 
     /* 2. 订阅中央 ECU 的整车心跳 */
     if (soa_subscribe_broadcast(HUI_NODE_ID, SoaBroadcast,
@@ -359,6 +361,16 @@ void HuiNode_Init(void)
                       HuiNode_OnHuiIoctlResponse) != SOA_OK)
     {
         ESP_LOGE(TAG, "订阅 HuiIoctl 失败");
+    }
+
+    /* 3b. 拉起 WiFi (ESP-NOW 的射频依赖)。
+           ⚠️ 必须放在建节点/订阅之后: 射频一开就可能收到帧, 而分发靠“实例 + 订阅”
+           两张表, 表还没建好时收到的帧会被直接丢弃。
+           本板没有别的 WiFi 使用者 (上网走 ML307 的 4G), 所以这里直接把 STA 拉起来;
+           若将来改用 WifiBoard 连 AP, 删掉这一句即可 —— ESP-NOW 会跟着那块 WiFi 起来。 */
+    if (soa_espnow_wifi_start_sta() != SOA_OK)
+    {
+        ESP_LOGE(TAG, "ESP-NOW/WiFi 启动失败: HUI 将收不到主机心跳");
     }
 
     /* 4. 周期任务: 1 Hz 发 SlaveHeartbeat */

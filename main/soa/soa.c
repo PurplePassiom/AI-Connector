@@ -3,6 +3,7 @@
 #include "soa_oncan.h"
 #include "soa_onipc.h"
 #include "soa_onuart.h"
+#include "soa_onespnow.h"
 
 void soa_init(void)
 {
@@ -30,6 +31,10 @@ void soa_create_node(uint8_t node_id, Soa_NodeType node_type)
     else if (node_type == SOA_NODE_UART)
     {
         soa_uart_create(node_id);
+    }
+    else if (node_type == SOA_NODE_ESPNOW)
+    {
+        soa_espnow_create(node_id);
     }
 }
 

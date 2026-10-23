@@ -8,6 +8,7 @@
                 "CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y",
                 "CONFIG_SPIRAM=n",
                 "CONFIG_SOA_ENABLE=y",
+                "CONFIG_SOA_ESPNOW_ENABLE=y",
                 "CONFIG_TBOX_COMMAND_MESSAGE=y",
                 "CONFIG_TBOX_LINK_ENABLE=y",
                 "CONFIG_TBOX_LINK_ENDPOINT=\"134.175.25.107:9000\"",

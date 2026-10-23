@@ -1233,13 +1233,48 @@ menu "SOA (Service-Oriented Architecture)"
         default y if BOARD_TYPE_ES8311_ML307_4G_VOICE
         help
             Enable the SOA framework ported from the MIO project (main/soa/):
-            router + CAN (canard/Cyphal) + IPC + UART transports, the per-node
+            router + CAN (canard/Cyphal) + IPC + UART transports (ESP-NOW is an
+            optional extra, see SOA_ESPNOW_ENABLE below), the per-node
             Soa_StateS state machine, and the HUI node (main/soa/hui.*) that talks
             to the vehicle Central ECU.
 
             Only boards that are actually wired to the vehicle CAN bus need this.
             The CAN pins are NOT configured here - each board passes them from its
             own config.h through can_bus_config_t.
+
+    config SOA_ESPNOW_ENABLE
+        bool "Enable ESP-NOW transport (SOA over Wi-Fi without a router)"
+        depends on SOA_ENABLE && ESP_WIFI_ENABLED
+        default n
+        help
+            用 ESP-NOW 承载 SOA 报文 (main/soa/soa_onespnow.c): 2.4 GHz 点对点/广播,
+            不需要路由器和 IP, 适合车内几块 ESP32 之间的低速控制总线。
+
+            用法:
+              1) 板子自己启动 WiFi (esp_wifi_start() 之后本层才能初始化) ——
+                 本层**不会**自己启动 WiFi, 也不会改 WiFi 模式。
+                 若板和中央 ECU 之间已经有 CAN, 两者可以同时作为 SOA 路径存在,
+                 用 soa_create_route_path() 决定每个节点对走哪条路。
+              2) soa_create_node(node_id, SOA_NODE_ESPNOW)
+              3) 想让报文走单播: soa_espnow_add_peer(对端 node_id, 对端 STA MAC);
+                 没登记的节点自动走广播 (帧头仍带 des_node, 接收端会过滤)。
+
+            同一信道才能互通 (默认跟随 WiFi 当前信道, 见下面 SOA_ESPNOW_CHANNEL)。
+            单帧 payload 上限 240 字节, 本层不分片。
+
+            未开启时 soa_onespnow.c 只编译空实现, 不把 esp_now 链接进固件。
+
+    config SOA_ESPNOW_CHANNEL
+        int "ESP-NOW fixed Wi-Fi channel (0 = keep the current channel)"
+        depends on SOA_ESPNOW_ENABLE
+        default 0
+        range 0 14
+        help
+            0 = 保持 WiFi 当前信道 (推荐: 板子正常连 AP 时不要动它)。
+
+            非 0 时本层在初始化时调用 esp_wifi_set_channel() 把信道固定下来。
+            ⚠️ 这会影响整块芯片的 WiFi: 若本机同时还连着 AP, 改信道可能把那条连接
+            一起挪走甚至断链。只有在"纯 ESP-NOW 组网、不连 AP"的场景才建议固定信道。
 
     config SOA_CAN_TRANSFER_ID_TIMEOUT_MS
         int "SOA CAN subscription transfer-ID timeout (ms)"

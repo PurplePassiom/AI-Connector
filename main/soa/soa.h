@@ -18,7 +18,8 @@ void soa_create_node(uint8_t node_id, Soa_NodeType node_type);
  * @brief Configure a route path between two nodes.
  * @param node_id1  First node.
  * @param node_id2  Second node.
- * @param path      Transport type (SOA_PATH_CAN or SOA_PATH_IPC).
+ * @param path      Transport type (SOA_PATH_CAN / SOA_PATH_IPC / SOA_PATH_UART /
+ *                  SOA_PATH_ESPNOW).
  */
 void soa_create_route_path(uint8_t node_id1, uint8_t node_id2,
                            Soa_PathType path);

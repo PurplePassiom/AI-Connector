@@ -1074,6 +1074,7 @@ if(CONFIG_SOA_ENABLE)
         "soa/soa_oncan.c"
         "soa/soa_onipc.c"
         "soa/soa_onuart.c"
+        "soa/soa_onespnow.c"
         "soa/Soa_StateS.c"
         "soa/hui.cc"
         "soa/hui_rpc.cc"
@@ -1171,6 +1172,10 @@ idf_component_register(SRCS ${SOURCES}
                         # 对所有板子都列上只是多编译一个小组件；没人引用 can_init() 时，
                         # 链接器不会把这个静态库拉进固件。
                         esp_driver_twai
+                        # esp_now.h / esp_wifi.h for main/soa/soa_onespnow.c.
+                        # 同样必须是字面量 (MINIMAL_BUILD 的早期 guess 趟看不到变量)。
+                        # WiFi 关闭的目标上 esp_wifi 会注册成空组件, 不会有额外开销。
+                        esp_wifi
                         esp_app_format
                         app_update
                         spi_flash

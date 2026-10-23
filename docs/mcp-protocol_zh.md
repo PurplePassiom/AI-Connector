@@ -267,3 +267,57 @@ sequenceDiagram
 ```
 
 这份文档概述了该项目中 MCP 协议的主要交互流程。具体的参数细节和工具功能需要参考 `main/mcp_server.cc` 中 `McpServer::AddCommonTools` 以及各个工具的实现。
+
+## 扩展: 服务器下发的单条命令 (`type: "command"`)
+
+> 只有 TBOX + AIBOX 二合一产品需要, 见 `main/Kconfig.projbuild`。
+> 联调用测试服务器见 [测试用 TSP 服务器](tsp-test-server_zh.md)。
+
+除了 AI 自主调用, 还有一条 "人在服务器端选好命令再下发" 的路径 (TBOX 侧)。
+它复用同一张工具表, 只是把 "选哪条命令" 从模型换成了人。消息不是 JSON-RPC,
+而是一条基础协议消息:
+
+有**两条**可选的到达方式, 由两个独立开关控制:
+
+| 开关 | 通道 | 用途 |
+| --- | --- | --- |
+| `CONFIG_TBOX_COMMAND_MESSAGE` | 复用 **AI 那条连接** | 台架/应急: 只多一个消息类型, 不改连接拓扑; 但依赖 AI 云在线 |
+| `CONFIG_TBOX_LINK_ENABLE` | 设备**另开一条独立连接**连到 TBOX 服务器 (TCP/可选 TLS, 行分隔 JSON) | 生产: 与 AI 云完全解耦 (AI 云不可用不影响控车) |
+
+两条都收敛到 `McpServer::CallTool()` → `ParseMessage()`, 也就是同一张工具表。
+
+```json
+{
+  "type": "command",
+  "name": "self.hui.host1.set_headlight",
+  "arguments": { "on": 1 }
+}
+```
+
+固件收到后只做一件事: 把它翻译成标准 MCP 请求并交给 `McpServer` —— 走 AI 通道的
+分支在 `main/application.cc`, 独立链路的在 `main/tbox_link.cc`, 两边都调
+`McpServer::CallTool()`:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": { "name": "self.hui.host1.set_headlight", "arguments": { "on": 1 } }
+}
+```
+
+因此它与 AI 的 `tools/call` 走**完全相同**的一条路径: 同一张工具表、同一份
+`Property` 范围/长度校验 (`-32602`)、同一份手册字节编码、以及工具内部的安全门槛
+(例如 `HuiNode_RequestHostSleep()` 只在中央 ECU 处于 WORKING 时才真正发出)。
+不存在 "绕过校验直接写总线" 的第二条路径。
+
+回执按普通 MCP 应答发出 (`type: "mcp"` + `payload.result` / `payload.error`),
+格式与 AI 调用时一致。
+
+- `name` 必填且必须是字符串; 工具名由 `tools/list` 给出 (或按命令手册推导, 见
+  [HUI 命令手册](hui-command-manual_zh.md))。
+- `arguments` 可选; 缺省或类型不对都由 `McpServer::ParseMessage` 按 MCP 规则处理
+  (`-32602`)。`id` 由固件生成, 服务器按 `name`/时间自行对应即可。
+- 只想给人用、不想被 AI 误触发的命令, 用 `AddUserOnlyTool()` 注册: 控制台侧
+  `tools/list` 带 `"withUserTools": true` 能看到, AI 侧不带就看不到。

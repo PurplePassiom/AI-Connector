@@ -2,6 +2,7 @@
 #include "soa_oncan.h"
 #include "soa_onipc.h"
 #include "soa_onuart.h"
+#include "soa_onespnow.h"
 #include <string.h>
 
 /* Default TX deadline when routing hides transport details (microseconds) */
@@ -66,6 +67,7 @@ void soa_router_init(void)
     soa_can_init();
     soa_ipc_init();
     soa_uart_init();
+    soa_espnow_init();
 }
 
 #if 1
@@ -82,7 +84,10 @@ int8_t soa_router_publish(uint8_t source_node, uint16_t object_id,
     int8_t r3 = soa_uart_publish(source_node, object_id,
                                     serialed_data, data_len,
                                     SOA_DEFAULT_TX_DEADLINE_USEC);
-    return (r1 == SOA_OK || r2 == SOA_OK || r3 == SOA_OK) ? SOA_OK : SOA_NOT_OK;
+    int8_t r4 = soa_espnow_publish(source_node, object_id,
+                                   serialed_data, data_len,
+                                   SOA_DEFAULT_TX_DEADLINE_USEC);
+    return (r1 == SOA_OK || r2 == SOA_OK || r3 == SOA_OK || r4 == SOA_OK) ? SOA_OK : SOA_NOT_OK;
 }
 #endif
 int8_t soa_router_subscribe(uint8_t own_node, uint8_t from_node, Soa_MessageType type,
@@ -98,6 +103,8 @@ int8_t soa_router_subscribe(uint8_t own_node, uint8_t from_node, Soa_MessageType
         return soa_ipc_subscribe(own_node, from_node, type, expect_id, max_size, callback);
     case SOA_PATH_UART:
         return soa_uart_subscribe(own_node, from_node, type, expect_id, max_size, callback);
+    case SOA_PATH_ESPNOW:
+        return soa_espnow_subscribe(own_node, from_node, type, expect_id, max_size, callback);
     default:
         return SOA_NOT_OK;
     }
@@ -108,7 +115,8 @@ int8_t soa_router_subscribe_broadcast(uint8_t own_node, Soa_MessageType type, ui
     int8_t r1 = soa_can_subscribe_broadcast(own_node, type, expect_id, max_size, callback);
     int8_t r2 = soa_ipc_subscribe_broadcast(own_node, type, expect_id, max_size, callback);
     int8_t r3 = soa_uart_subscribe_broadcast(own_node, type, expect_id, max_size, callback);
-    return (r1 == SOA_OK || r2 == SOA_OK || r3 == SOA_OK) ? SOA_OK : SOA_NOT_OK;
+    int8_t r4 = soa_espnow_subscribe_broadcast(own_node, type, expect_id, max_size, callback);
+    return (r1 == SOA_OK || r2 == SOA_OK || r3 == SOA_OK || r4 == SOA_OK) ? SOA_OK : SOA_NOT_OK;
 }
 
 int8_t soa_router_request_send(uint8_t src_node, uint8_t des_node,
@@ -131,6 +139,10 @@ int8_t soa_router_request_send(uint8_t src_node, uint8_t des_node,
         return soa_uart_request_send(src_node, des_node,
                                      service_id, serialed_data, data_len,
                                      SOA_DEFAULT_TX_DEADLINE_USEC);
+    case SOA_PATH_ESPNOW:
+        return soa_espnow_request_send(src_node, des_node,
+                                       service_id, serialed_data, data_len,
+                                       SOA_DEFAULT_TX_DEADLINE_USEC);
     default:
         return SOA_NOT_OK;
     }
@@ -156,6 +168,10 @@ int8_t soa_router_response_send(uint8_t src_node, uint8_t des_node,
         return soa_uart_response_send(src_node, des_node,
                                       service_id, serialed_data, data_len,
                                       SOA_DEFAULT_TX_DEADLINE_USEC);
+    case SOA_PATH_ESPNOW:
+        return soa_espnow_response_send(src_node, des_node,
+                                        service_id, serialed_data, data_len,
+                                        SOA_DEFAULT_TX_DEADLINE_USEC);
     default:
         return SOA_NOT_OK;
     }
