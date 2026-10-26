@@ -1,0 +1,4 @@
+[submodule "main/soa/Sop"]
+	path = main/soa/Sop
+	url = https://github.com/PurplePassiom/Sop.git
+	branch = sop_esp32

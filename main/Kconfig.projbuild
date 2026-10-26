@@ -1234,8 +1234,8 @@ menu "SOA (Service-Oriented Architecture)"
         help
             Enable the SOA framework ported from the MIO project (main/soa/):
             router + CAN (canard/Cyphal) + IPC + UART transports (ESP-NOW is an
-            optional extra, see SOA_ESPNOW_ENABLE below), the per-node
-            Soa_StateS state machine, and the HUI node (main/soa/hui.*) that talks
+            optional extra, see SOA_ESPNOW_ENABLE below),
+            and the HUI node (main/soa/hui.*) that talks
             to the vehicle Central ECU.
 
             Only boards that are actually wired to the vehicle CAN bus need this.
@@ -1247,7 +1247,7 @@ menu "SOA (Service-Oriented Architecture)"
         depends on SOA_ENABLE && ESP_WIFI_ENABLED
         default n
         help
-            用 ESP-NOW 承载 SOA 报文 (main/soa/soa_onespnow.c): 2.4 GHz 点对点/广播,
+            用 ESP-NOW 承载 SOA 报文 (main/soa/Sop/soa_onespnow.c): 2.4 GHz 点对点/广播,
             不需要路由器和 IP, 适合车内几块 ESP32 之间的低速控制总线。
 
             用法:

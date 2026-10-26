@@ -1068,20 +1068,21 @@ endif()
 # Kept behind a Kconfig switch: it pulls in the CAN (TWAI) driver, which does not
 # exist on every target this repo supports.
 if(CONFIG_SOA_ENABLE)
+    # Protocol layer lives in its own sub-repo: main/soa/Sop (SOA/SOP stack + canard).
+    # Business layer (hui*.cc) stays directly under main/soa/.
     list(APPEND SOURCES
-        "soa/soa.c"
-        "soa/soa_router.c"
-        "soa/soa_oncan.c"
-        "soa/soa_onipc.c"
-        "soa/soa_onuart.c"
-        "soa/soa_onespnow.c"
-        "soa/Soa_StateS.c"
+        "soa/Sop/soa.c"
+        "soa/Sop/soa_router.c"
+        "soa/Sop/soa_oncan.c"
+        "soa/Sop/soa_onipc.c"
+        "soa/Sop/soa_onuart.c"
+        "soa/Sop/soa_onespnow.c"
         "soa/hui.cc"
         "soa/hui_rpc.cc"
         "soa/hui_manual.cc"
         "soa/hui_mcp.cc"
-        "soa/canard/canard.c"
-        "soa/port/can_bus.c"
+        "soa/Sop/canard/canard.c"
+        "soa/Sop/esp32_can/can_bus.c"
     )
     # main/dsdl holds the generated DSDL (Cyphal) headers. Each sub-directory is a
     # namespace (dsdl_Common, dsdl_Host, dsdl_CenterAnd*, ...) and is included by
@@ -1096,8 +1097,9 @@ if(CONFIG_SOA_ENABLE)
     endforeach()
     list(APPEND INCLUDE_DIRS
         "${CMAKE_CURRENT_SOURCE_DIR}/soa"
-        "${CMAKE_CURRENT_SOURCE_DIR}/soa/canard"
-        "${CMAKE_CURRENT_SOURCE_DIR}/soa/port"
+        "${CMAKE_CURRENT_SOURCE_DIR}/soa/Sop"
+        "${CMAKE_CURRENT_SOURCE_DIR}/soa/Sop/canard"
+        "${CMAKE_CURRENT_SOURCE_DIR}/soa/Sop/esp32_can"
         # required by <nunavut/support/serialization.h>
         "${CMAKE_CURRENT_SOURCE_DIR}/dsdl"
     )
@@ -1164,7 +1166,7 @@ idf_component_register(SRCS ${SOURCES}
                         esp_driver_jpeg
                         esp_driver_ppa
                         esp_driver_tsens
-                        # esp_twai.h (the IDF 6.x TWAI driver) for main/soa/port/can_bus.c.
+                        # esp_twai.h (the IDF 6.x TWAI driver) for main/soa/Sop/esp32_can/can_bus.c.
                         # ⚠️ 必须写在这里（字面量），不能放进 MAIN_PRIV_REQUIRES_EXTRA：
                         # 本工程开了 MINIMAL_BUILD，IDF 会在早期的 "guess" 趟里就定下组件集，
                         # 而那一趟看不到通过变量追加的需求 —— esp_driver_twai 会被裁掉，
@@ -1172,7 +1174,7 @@ idf_component_register(SRCS ${SOURCES}
                         # 对所有板子都列上只是多编译一个小组件；没人引用 can_init() 时，
                         # 链接器不会把这个静态库拉进固件。
                         esp_driver_twai
-                        # esp_now.h / esp_wifi.h for main/soa/soa_onespnow.c.
+                        # esp_now.h / esp_wifi.h for main/soa/Sop/soa_onespnow.c.
                         # 同样必须是字面量 (MINIMAL_BUILD 的早期 guess 趟看不到变量)。
                         # WiFi 关闭的目标上 esp_wifi 会注册成空组件, 不会有额外开销。
                         esp_wifi

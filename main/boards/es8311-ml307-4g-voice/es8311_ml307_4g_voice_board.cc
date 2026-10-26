@@ -197,7 +197,7 @@ private:
 
 #if SOA_CAN_ENABLE
     // ===== CAN (TWAI) 整车总线 =====
-    // 引脚/波特率/STB 极性全部来自板级 config.h，核心代码 (main/soa/port/can_bus.c)
+    // 引脚/波特率/STB 极性全部来自板级 config.h，核心代码 (main/soa/Sop/esp32_can/can_bus.c)
     // 不认识任何板子。
     void InitializeCan() {
         const can_bus_config_t can_cfg = {
