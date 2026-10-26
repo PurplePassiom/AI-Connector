@@ -1,172 +1,219 @@
-# An MCP-based Chatbot
+# AI Connector
 
-(English | [中文](README_zh.md) | [日本語](README_ja.md))
+(English | [中文](README_zh.md))
 
-## Introduction
+Based on [xiaozhi-esp32](https://github.com/78/xiaozhi-esp32) (MIT), this ESP32-S3 firmware is **one chip and one image that is both an AIBOX and a TBOX.**
 
-👉 [Human: Give AI a camera vs AI: Instantly finds out the owner hasn't washed hair for three days【bilibili】](https://www.bilibili.com/video/BV1bpjgzKEhd/)
+- **AIBOX** — connects over Cat.1 4G and talks to large models such as Qwen / DeepSeek (Opus streaming, server-side AEC interruption).
+- **TBOX** — a node on the vehicle CAN bus: the **HUI node** of the SOA framework, driving the central ECU through MCP tools.
+- **Both control paths share a single tool table** — the model calls it during a conversation, and an operator can also pick a command from a server console.
 
-👉 [Handcraft your AI girlfriend, beginner's guide【bilibili】](https://www.bilibili.com/video/BV1XnmFYLEJN/)
+End to end: press BOOT and speak → cloud ASR + LLM + TTS → `tools/call` → the firmware encodes the request into a CAN frame from the command manual → the central ECU answers → the result travels back to the model / the server.
 
-As a voice interaction entry, the XiaoZhi AI chatbot leverages the AI capabilities of large models like Qwen / DeepSeek, and achieves multi-terminal control via the MCP protocol.
+## Capabilities
 
-<img src="docs/mcp-based-graph.jpg" alt="Control everything via MCP" width="320">
+| Capability | Implementation |
+| --- | --- |
+| Voice | ES8311 codec + NS4150B amplifier, full-duplex I2S; Opus streaming; wake by BOOT key; server-side AEC allows interrupting playback |
+| Network | ML307C Cat.1 4G (AT channel, PWRKEY power-on); the `ml307_net_heal` watchdog recovers the modem from the "no network + SIM unavailable" deadlock |
+| Vehicle control | SOA/HUI node on the vehicle CAN bus (TWAI, 500 kbps), built on canard/Cyphal |
+| MCP tools | Command manual → one `self.hui.*` tool per command, with real JSON Schema parameters |
+| Dual path | Cloud MCP for the model plus an independent TBOX link (TCP/NDJSON); neither depends on the other |
+| Command manual | JSON packed into the assets partition — available at boot, no network needed, updatable on its own |
+| OTA | Inherits the upstream OTA (`CONFIG_OTA_URL`); MQTT / WebSocket settings are delivered by OTA |
+| Other | No display, camera or touch; WS2812 status LED; localized voice prompts (upstream assets) |
 
-## Recent Updates
+> This board uses `CONFIG_SPIRAM=n`, so ESP-SR offline wake-up is not available (no AFE / WakeNet) and BOOT is the wake key.
+> To enable a wake word, first move the amplifier enable off IO37 — IO37 is the DQS line of the octal PSRAM.
 
-- The project now requires ESP-IDF v6.0.1 or later. [ESP-IDF v6.1](https://github.com/espressif/esp-idf/releases/tag/v6.1) is the recommended SDK. ESP-IDF 5.x is no longer supported. The current matrix contains 171 variants; ESP32-S31 builds require IDF 6.1 or later.
-- MQTT and BluFi cryptographic code has migrated to PSA Crypto. IDF 6 component splits and third-party dependency compatibility have also been addressed.
-- Audio pipeline concurrency, MQTT/UDP packet validation, and release-matrix selection have been hardened.
-- ESP32-P4 Rev1 and Rev3 are both supported on IDF 6 with ESP-SR 2.4.7.
+## Architecture
 
-### Features Implemented
+```text
+main/
+├── application.*            main event loop, protocol lifecycle, high-level behavior
+├── device_state_machine.*   runtime state machine (only via Application::SetDeviceState)
+├── protocols/               WebSocket and MQTT + UDP transports (same Protocol semantics)
+├── mcp_server.*             tool table and tools/call dispatch (shared by both paths)
+├── tbox_link.*              TBOX link: TCP (optional TLS) + newline-delimited JSON
+├── soa/
+│   ├── Sop/                 SOA layer: router + CAN/IPC/UART/ESP-NOW + canard
+│   ├── hui.*                HUI node (identity and heartbeat on the bus)
+│   ├── hui_rpc.*            synchronous read/write/ioctl transactions (serialized, late replies dropped)
+│   ├── hui_manual.*         command manual loading (assets partition first)
+│   ├── hui_mcp.*            manual → MCP tools
+│   └── manuals/             per-host command manual JSON (packed into the assets partition)
+├── boards/es8311-ml307-4g-voice/   the only board implementation shipped here
+└── Kconfig.projbuild        audio / SOA / TBOX options
+```
 
-- Wi-Fi, wired Ethernet, USB RNDIS, and ML307/EC801E or NT26 Cat.1 4G networking; supported boards can switch between Wi-Fi and 4G
-- Offline voice wake-up with [ESP-SR](https://github.com/espressif/esp-sr), including customizable wake words
-- Two communication transports: [WebSocket](docs/websocket.md) and [MQTT + UDP](docs/mqtt-udp.md)
-- Opus audio streaming with conventional streaming ASR + LLM + TTS pipelines and Realtime end-to-end voice models; AEC-capable hardware supports realtime full-duplex interaction
-- Speaker recognition, identifies the current speaker [3D Speaker](https://github.com/modelscope/3D-Speaker)
-- OLED / LCD displays with emoji and rich expression support, plus camera vision input on supported boards
-- Battery display and power management
-- 39 interface languages, with localized voice prompts where available and English fallback
-- ESP32, ESP32-C3, ESP32-C5, ESP32-C6, ESP32-S3, and ESP32-P4 chip platforms
-- Wi-Fi provisioning through hotspot or BluFi
-- Device-side MCP for device control (Speaker, LED, Servo, GPIO, etc.)
-- Cloud-side MCP to extend large model capabilities (smart home control, PC desktop operation, knowledge search, email, etc.)
-- Customizable wake words, fonts, emojis, and chat backgrounds with online web-based editing ([Custom Assets Generator](https://github.com/78/xiaozhi-assets-generator))
+```mermaid
+flowchart TB
+    MIC["Microphone / BOOT key"] --> APP["Application / state machine"]
+    APP <--> CLOUD["XiaoZhi cloud: ASR · LLM · TTS"]
+    APP <--> TSP["TBOX server (TCP/NDJSON)"]
+    APP --> MCP["McpServer / tool table"]
+    MCP <--> HUI["HUI node (SOA over CAN)"]
+    HUI <--> ECU["Central ECU"]
+```
+
+## One tool table, two control paths
+
+| | AI path | TBOX link |
+| --- | --- | --- |
+| Trigger | the cloud model (`tools/call`) | a person picking a command on the server |
+| Connection | MQTT / WebSocket config delivered by OTA (third-party backend) | TCP dialed by the device, TLS optional |
+| Configuration | OTA, stored in NVS | Kconfig `CONFIG_TBOX_LINK_*`, NVS namespace `tbox` wins |
+| Downlink | standard JSON-RPC | `{"type":"command",name,arguments}`, `{"type":"mcp","payload":…}` or bare JSON-RPC |
+| Uplink | back on the AI path | `{"type":"mcp","payload":…}` on the same connection |
+
+Design constraints:
+
+- **Exactly one tool table.** Both paths end in `McpServer::CallTool()`, so argument validation, manual byte encoding and in-tool safety gates exist once. Calling `HuiNode_*` directly is forbidden — on a vehicle bus a wrong byte is not recoverable.
+- **The link must be independent.** The AI backend is third-party and its settings come from OTA; we can neither change it nor let the TBOX server borrow that session.
+- **No second MQTT client.** The ML307 `MQTTSTATE` URC carries no client index, so two `Ml307Mqtt` instances clear each other's `connected_` (measured on hardware: whichever connects later silences the other). The TBOX link therefore uses TCP + newline-delimited JSON.
+- **Connection ids must not collide.** On the ML307 the id passed to `CreateTcp/Udp(id)` goes straight into `AT+MIPOPEN=<id>`; the displaced socket receives no URC at all and dies silently. In use: `0` MQTT/HTTP, `1` WebSocket, `2` AI audio UDP, `3` camera/upgrade HTTP, `4` TBOX link.
+- **A failed send means reconnect.** A socket closed silently never delivers `OnDisconnected`, so a failed `SendJson()` is the most reliable failure signal.
+
+## MCP tools generated from the command manual
+
+The HUI bus exposes only three generic services: `read` (301), `write` (302) and `ioctl` (303). Command numbers are not self-describing, and the same function has a different number on different hosts. The firmware therefore:
+
+1. reads `0x1000` at boot to learn the device ID from the central ECU;
+2. looks up that device's command manual in the assets partition (or fetches it from the backend when online);
+3. creates **one MCP tool per command**, with a real JSON Schema generated from the manual's `args`;
+4. encodes the bytes itself (big-endian, ioctl prepends the 2-byte command code) — the model only speaks human terms.
+
+```text
+self.hui.<alias|host_<device_id>>.<command name>
+
+self.hui.host1.get_device_id()
+self.hui.host1.get_battery()            -> {"command":"FF01","ok":true,"raw":"55","value":85,"unit":"%"}
+self.hui.host1.set_headlight(on=true)   -> ioctl F101 01
+```
+
+```json
+{"jsonrpc":"2.0","id":7,"method":"tools/call",
+ "params":{"name":"self.hui.host1.set_headlight","arguments":{"on":true}}}
+```
+
+Known limits: `tools/list` is capped at 8000 bytes per page, each description is truncated to 5500 bytes, and `HUI_MCP_MAX_TOOLS = 24`. Commands beyond that are not listed as tools; trim the manual or group commands.
+
+See [HUI command manual → MCP tools](docs/hui-command-manual_zh.md) for the full rules (Chinese).
 
 ## Hardware
 
-### Breadboard DIY Practice
+Only one board is maintained: `es8311-ml307-4g-voice` (ESP32-S3-WROOM-1-N16R8 + ES8311 + ML307C). The full pinout, power notes and bring-up details are in the [board README](main/boards/es8311-ml307-4g-voice/README.md) (Chinese).
 
-See the Feishu document tutorial:
+| Function | Pins |
+| --- | --- |
+| BOOT key (wake) | IO0 (pulled up, active low) |
+| Status LED (WS2812) | IO38 |
+| Amplifier enable PA_EN (active high) | IO37 |
+| I2S MCLK / BCLK / LRCK | IO4 / IO15 / IO6 |
+| I2S DOUT → ES8311 `DSDIN` (crossed on this board) | IO5 |
+| I2S DIN ← ES8311 `ASDOUT` (crossed on this board) | IO7 |
+| Codec I2C SDA / SCL | IO17 / IO18 |
+| 4G UART (ESP TX / RX), PWRKEY, STATE | IO44 / IO43, IO47, IO48 |
+| CAN (TWAI): TX / RX / STB | IO39 / IO40 / IO41 (500 kbps) |
+| USB-Serial/JTAG console | IO19 / IO20 (must stay reserved) |
 
-👉 ["XiaoZhi AI Chatbot Encyclopedia"](https://ccnphfhqs21z.feishu.cn/wiki/F5krwD16viZoF0kKkvDcrZNYnhb?from=from_copylink)
+Two traps worth remembering:
 
-Breadboard demo:
+- **The I2S data lines are crossed on the PCB**: ES8311 `DSDIN` is wired to ESP `IO5` and `ASDOUT` to `IO7`. The conventional `DOUT=IO7 / DIN=IO5` yields "every clock correct, every codec register correct, speaker completely silent".
+- **PSRAM must stay off**: IO37 is the DQS line of the octal PSRAM, so `CONFIG_SPIRAM=y` hands it to MSPI and `gpio_set_level` can no longer drive the amplifier enable — the speaker goes silent.
 
-![Breadboard Demo](docs/v1/wiring2.jpg)
+## Getting started
 
-### Supports 138 Board Directories and 171 Release Variants (Partial List)
+### Requirements
 
-- <a href="https://oshwhub.com/li-chuang-kai-fa-ban/li-chuang-shi-zhan-pai-esp32-s3-kai-fa-ban" target="_blank" title="LiChuang ESP32-S3 Development Board">LiChuang ESP32-S3 Development Board</a>
-- <a href="https://github.com/espressif/esp-box" target="_blank" title="Espressif ESP32-S3-BOX-3">Espressif ESP32-S3-BOX-3</a>
-- <a href="https://docs.m5stack.com/zh_CN/core/CoreS3" target="_blank" title="M5Stack CoreS3">M5Stack CoreS3</a>
-- <a href="https://docs.m5stack.com/en/atom/Atomic%20Echo%20Base" target="_blank" title="AtomS3R + Echo Base">M5Stack AtomS3R + Echo Base</a>
-- <a href="https://gf.bilibili.com/item/detail/1108782064" target="_blank" title="Magic Button 2.4">Magic Button 2.4</a>
-- <a href="https://www.waveshare.net/shop/ESP32-S3-Touch-AMOLED-1.8.htm" target="_blank" title="Waveshare ESP32-S3-Touch-AMOLED-1.8">Waveshare ESP32-S3-Touch-AMOLED-1.8</a>
-- <a href="https://github.com/Xinyuan-LilyGO/T-Circle-S3" target="_blank" title="LILYGO T-Circle-S3">LILYGO T-Circle-S3</a>
-- <a href="https://oshwhub.com/tenclass01/xmini_c3" target="_blank" title="XiaGe Mini C3">XiaGe Mini C3</a>
-- <a href="https://oshwhub.com/movecall/cuican-ai-pendant-lights-up-y" target="_blank" title="Movecall CuiCan ESP32S3">CuiCan AI Pendant</a>
-- <a href="https://github.com/WMnologo/xingzhi-ai" target="_blank" title="WMnologo-Xingzhi-1.54">WMnologo-Xingzhi-1.54TFT</a>
-- <a href="https://www.seeedstudio.com/SenseCAP-Watcher-W1-A-p-5979.html" target="_blank" title="SenseCAP Watcher">SenseCAP Watcher</a>
-- <a href="https://www.bilibili.com/video/BV1BHJtz6E2S/" target="_blank" title="ESP-HI Low Cost Robot Dog">ESP-HI Low Cost Robot Dog</a>
+- ESP-IDF **v6.0.1 or later**, [v6.1](https://github.com/espressif/esp-idf/releases/tag/v6.1) recommended; ESP-IDF 5.x is not supported
+- VS Code / Cursor with the ESP-IDF extension, or a plain command line
+- Google C++ style; format touched files as described in [code style](docs/code_style.md)
 
-<div style="display: flex; justify-content: space-between;">
-  <a href="docs/v1/lichuang-s3.jpg" target="_blank" title="LiChuang ESP32-S3 Development Board">
-    <img src="docs/v1/lichuang-s3.jpg" width="240" />
-  </a>
-  <a href="docs/v1/espbox3.jpg" target="_blank" title="Espressif ESP32-S3-BOX3">
-    <img src="docs/v1/espbox3.jpg" width="240" />
-  </a>
-  <a href="docs/v1/m5cores3.jpg" target="_blank" title="M5Stack CoreS3">
-    <img src="docs/v1/m5cores3.jpg" width="240" />
-  </a>
-  <a href="docs/v1/atoms3r.jpg" target="_blank" title="AtomS3R + Echo Base">
-    <img src="docs/v1/atoms3r.jpg" width="240" />
-  </a>
-  <a href="docs/v1/magiclick.jpg" target="_blank" title="Magic Button 2.4">
-    <img src="docs/v1/magiclick.jpg" width="240" />
-  </a>
-  <a href="docs/v1/waveshare.jpg" target="_blank" title="Waveshare ESP32-S3-Touch-AMOLED-1.8">
-    <img src="docs/v1/waveshare.jpg" width="240" />
-  </a>
-  <a href="docs/v1/lilygo-t-circle-s3.jpg" target="_blank" title="LILYGO T-Circle-S3">
-    <img src="docs/v1/lilygo-t-circle-s3.jpg" width="240" />
-  </a>
-  <a href="docs/v1/xmini-c3.jpg" target="_blank" title="XiaGe Mini C3">
-    <img src="docs/v1/xmini-c3.jpg" width="240" />
-  </a>
-  <a href="docs/v1/movecall-cuican-esp32s3.jpg" target="_blank" title="CuiCan">
-    <img src="docs/v1/movecall-cuican-esp32s3.jpg" width="240" />
-  </a>
-  <a href="docs/v1/wmnologo_xingzhi_1.54.jpg" target="_blank" title="WMnologo-Xingzhi-1.54">
-    <img src="docs/v1/wmnologo_xingzhi_1.54.jpg" width="240" />
-  </a>
-  <a href="docs/v1/sensecap_watcher.jpg" target="_blank" title="SenseCAP Watcher">
-    <img src="docs/v1/sensecap_watcher.jpg" width="240" />
-  </a>
-  <a href="docs/v1/esp-hi.jpg" target="_blank" title="ESP-HI Low Cost Robot Dog">
-    <img src="docs/v1/esp-hi.jpg" width="240" />
-  </a>
-</div>
+### Build
 
-## Software
+```sh
+# source the target ESP-IDF environment first
+. $IDF_PATH/export.sh          # Windows PowerShell: . $env:IDF_PATH\export.ps1
 
-### Firmware Flashing
+python scripts/build.py --list-boards
+python scripts/build.py es8311-ml307-4g-voice --name es8311-ml307-4g-voice
+```
 
-For beginners, it is recommended to use the firmware that can be flashed without setting up a development environment.
+> `scripts/build.py` is the only entry point for board configuration: it regenerates the local
+> `sdkconfig` and overlays the `sdkconfig_append` entries from `config.json`. Do not reconfigure
+> with a bare `idf.py` (it falls back to esp32 and prunes dependencies).
 
-The firmware connects to the official [xiaozhi.me](https://xiaozhi.me) server by default. Personal users can register an account to use the Qwen real-time model for free.
+### Flash
 
-👉 [Beginner's Firmware Flashing Guide](https://ccnphfhqs21z.feishu.cn/wiki/Zpz4wXBtdimBrLk25WdcXzxcnNS)
+```sh
+idf.py -DIDF_TARGET=esp32s3 -p <PORT> flash monitor
+```
 
-### Development Environment
+A single `flash` writes both the app and the assets partition (which holds `main/soa/manuals/*.json`). To update only the manuals, no app reflash is needed:
 
-- Cursor or VSCode
-- Install the ESP-IDF plugin. The minimum SDK is [ESP-IDF v6.0.1](https://github.com/espressif/esp-idf/releases/tag/v6.0.1); [ESP-IDF v6.1](https://github.com/espressif/esp-idf/releases/tag/v6.1) is recommended. ESP-IDF 5.x is not supported.
-- Linux is better than Windows for faster compilation and fewer driver issues
-- This project uses Google C++ code style, please ensure compliance when submitting code
+```sh
+esptool --chip esp32s3 write-flash 0x800000 build/generated_assets.bin
+```
 
-### Developer Documentation
+### Host-side tests
 
-- [Custom Board Guide](docs/custom-board.md) - Learn how to create custom boards for XiaoZhi AI
-- [MCP Protocol IoT Control Usage](docs/mcp-usage.md) - Learn how to control IoT devices via MCP protocol
-- [MCP Protocol Interaction Flow](docs/mcp-protocol.md) - Device-side MCP protocol implementation
-- [MQTT + UDP Hybrid Communication Protocol Document](docs/mqtt-udp.md)
-- [A detailed WebSocket communication protocol document](docs/websocket.md)
+```sh
+python -m unittest discover -s scripts/tests -v
+```
 
-## Large Model Configuration
+## Configuration
 
-If you already have a XiaoZhi AI chatbot device and have connected to the official server, you can log in to the [xiaozhi.me](https://xiaozhi.me) console for configuration.
+Board defaults live in the `sdkconfig_append` list of `main/boards/es8311-ml307-4g-voice/config.json`:
 
-👉 [Backend Operation Video Tutorial (Old Interface)](https://www.bilibili.com/video/BV1jUCUY2EKM/)
+| Option | Meaning |
+| --- | --- |
+| `CONFIG_SOA_ENABLE` | enable the SOA layer and the HUI node |
+| `CONFIG_SOA_ESPNOW_ENABLE` | also enable the ESP-NOW transport (useful for testing without CAN) |
+| `CONFIG_HUI_RPC_TIMEOUT_MS` | HUI transaction timeout. The central ECU answers in about 500 ms; too tight a value times out every request and drops the late reply — the device ID never arrives and the model sees no tools |
+| `CONFIG_HUI_MANUAL_READ_TIMEOUT_MS` | timeout for loading a command manual (flash or network) |
+| `CONFIG_TBOX_LINK_ENABLE` | enable the independent TBOX link |
+| `CONFIG_TBOX_LINK_ENDPOINT` | `host:port` |
+| `CONFIG_TBOX_LINK_TLS` | use TLS for the link |
+| `CONFIG_TBOX_LINK_CHANNEL` / `CLIENT_ID` / `TOKEN` | link identity and authentication |
+| `CONFIG_TBOX_COMMAND_MESSAGE` | bench mode: let the AI path accept `{"type":"command",…}` directly, without the separate link |
+| `CONFIG_OTA_URL` | keep the default XiaoZhi cloud; pointing it at the test TSP breaks the audio channel handshake (the key appears dead) |
+| `GNSS_TEST` / `NET_HEAL_ENABLE` (board `config.h`) | GNSS self-test task / 4G recovery watchdog |
 
-## Related Open Source Projects
+At runtime the endpoint, channel, client_id, token and ping interval can be overridden through NVS (namespace `tbox`), so a deployed unit can be repointed without rebuilding.
 
-For server deployment on personal computers, refer to the following open-source projects:
+## Bench and test server
 
-- [xinnan-tech/xiaozhi-esp32-server](https://github.com/xinnan-tech/xiaozhi-esp32-server) Python server
-- [joey-zhou/xiaozhi-esp32-server-java](https://github.com/joey-zhou/xiaozhi-esp32-server-java) Java server
-- [AnimeAIChat/xiaozhi-server-go](https://github.com/AnimeAIChat/xiaozhi-server-go) Golang server
-- [hackers365/xiaozhi-esp32-server-golang](https://github.com/hackers365/xiaozhi-esp32-server-golang) Golang server
+`scripts/tsp_server.py` runs three endpoints in one process for development without a real backend:
 
-Other client projects using the XiaoZhi communication protocol:
+- OTA endpoint (HTTP 8000) + MQTT broker (1883) for the **AI path**;
+- TCP / NDJSON (9000) for the **TBOX link**;
+- a web console to list devices, pull `tools/list`, invoke a tool by name and inspect the replies.
 
-- [huangjunsen0406/py-xiaozhi](https://github.com/huangjunsen0406/py-xiaozhi) Python client
-- [TOM88812/xiaozhi-android-client](https://github.com/TOM88812/xiaozhi-android-client) Android client
-- [100askTeam/xiaozhi-linux](http://github.com/100askTeam/xiaozhi-linux) Linux client by 100ask
-- [78/xiaozhi-sf32](https://github.com/78/xiaozhi-sf32) Bluetooth chip firmware by Sichuan
-- [QuecPython/solution-xiaozhiAI](https://github.com/QuecPython/solution-xiaozhiAI) QuecPython firmware by Quectel
+See the [test TSP guide](docs/tsp-test-server_zh.md) (Chinese). Rules that matter:
 
-Custom Assets Tools:
+- a publicly reachable test server **must authenticate** (MQTT username/password plus the token in the TCP hello), otherwise anyone can inject vehicle-control commands;
+- never point `CONFIG_OTA_URL` at the test TSP — it does not implement the audio channel handshake, so pressing the key appears to do nothing;
+- when only editing a manual, `python scripts/hui_manual_server.py --check` is the fastest validation.
 
-- [78/xiaozhi-assets-generator](https://github.com/78/xiaozhi-assets-generator) Custom Assets Generator (Wake words, fonts, emojis, backgrounds)
+## Documentation
 
-## About the Project
+| Document | Contents |
+| --- | --- |
+| [Board README](main/boards/es8311-ml307-4g-voice/README.md) | pinout, hardware resources, CAN/HUI notes |
+| [HUI command manual → MCP tools](docs/hui-command-manual_zh.md) | manual format, tool naming, encoding rules |
+| [Test TSP guide](docs/tsp-test-server_zh.md) | OTA + MQTT + TCP bench server |
+| [SOA layer](main/soa/Sop/README.md) | route table semantics, wire formats, threading model |
+| [MCP interaction flow](docs/mcp-protocol.md) / [usage](docs/mcp-usage.md) | device-side MCP implementation and usage |
+| [MQTT + UDP](docs/mqtt-udp.md) / [WebSocket](docs/websocket.md) | model communication protocols |
+| [Custom board guide](docs/custom-board.md) | the `config.json` → Kconfig → CMake chain for a new board |
 
-This is an open-source ESP32 project, released under the MIT license, allowing anyone to use it for free, including for commercial purposes.
+## Relationship to upstream
 
-We hope this project helps everyone understand AI hardware development and apply rapidly evolving large language models to real hardware devices.
+- Voice conversation, transports (WebSocket / MQTT + UDP), audio, OTA and the rest come from [78/xiaozhi-esp32](https://github.com/78/xiaozhi-esp32).
+- This repository adds the SOA layer and HUI node, manual-driven dynamic MCP tools, the independent TBOX link, a 4G recovery watchdog, and a dedicated board.
+- Only `main/boards/es8311-ml307-4g-voice` is maintained here; the other upstream board directories are kept as-is for future reuse.
 
-If you have any ideas or suggestions, please feel free to raise Issues or join our [Discord](https://discord.gg/C759fGMBcZ) or QQ group: 1095994019
+## License
 
-## Star History
-
-<a href="https://star-history.com/#78/xiaozhi-esp32&Date">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=78/xiaozhi-esp32&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=78/xiaozhi-esp32&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=78/xiaozhi-esp32&type=Date" />
- </picture>
-</a>
+MIT, see [LICENSE](LICENSE). Upstream xiaozhi-esp32 is MIT as well; `main/soa/Sop/canard` keeps its OpenCyphal MIT license.
