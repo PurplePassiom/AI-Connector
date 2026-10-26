@@ -124,6 +124,10 @@ self.hui.host1.set_headlight(on=true)   -> ioctl F101 01
 
 ## 快速开始
 
+> 克隆时带上子模块：`git clone --recurse-submodules https://github.com/PurplePassiom/AI-Connector.git`。
+> SOA 协议层在 `main/soa/Sop` 子模块里（[PurplePassiom/Sop](https://github.com/PurplePassiom/Sop)，分支 `sop_esp32`）；
+> 已有工作区用 `git submodule update --init --recursive` 补齐，否则链接阶段会缺 `soa_*` 符号。
+
 ### 环境
 
 - ESP-IDF **v6.0.1 或以上**，推荐 [v6.1](https://github.com/espressif/esp-idf/releases/tag/v6.1)；不支持 IDF 5.x

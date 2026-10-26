@@ -124,6 +124,11 @@ Two traps worth remembering:
 
 ## Getting started
 
+> Clone with submodules: `git clone --recurse-submodules https://github.com/PurplePassiom/AI-Connector.git`.
+> The SOA layer lives in the `main/soa/Sop` submodule ([PurplePassiom/Sop](https://github.com/PurplePassiom/Sop),
+> branch `sop_esp32`); for an existing checkout run `git submodule update --init --recursive`, otherwise the
+> link step fails on the `soa_*` symbols.
+
 ### Requirements
 
 - ESP-IDF **v6.0.1 or later**, [v6.1](https://github.com/espressif/esp-idf/releases/tag/v6.1) recommended; ESP-IDF 5.x is not supported
